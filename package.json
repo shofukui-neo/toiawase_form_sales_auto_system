@@ -1,0 +1,35 @@
+{
+  "name": "toiawase-form-sales-auto-system",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MOCHICA form-sales outbound automation (spec v0.1)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cli": "tsx src/index.ts",
+    "postinstall": "playwright install chromium",
+    "testform": "tsx scripts/test_form_server.ts",
+    "e2e": "tsx scripts/e2e_local.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "better-sqlite3": "^11.7.0",
+    "cheerio": "^1.0.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "fast-xml-parser": "^4.5.1",
+    "playwright": "^1.49.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

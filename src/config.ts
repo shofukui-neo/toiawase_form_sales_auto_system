@@ -1,0 +1,79 @@
+import 'dotenv/config';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+/** Project root (one level up from src/). */
+export const ROOT = resolve(__dirname, '..');
+
+function envStr(key: string, fallback: string): string {
+  const v = process.env[key];
+  return v === undefined || v === '' ? fallback : v;
+}
+function envInt(key: string, fallback: number): number {
+  const v = process.env[key];
+  if (v === undefined || v === '') return fallback;
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+function envBool(key: string, fallback: boolean): boolean {
+  const v = process.env[key];
+  if (v === undefined || v === '') return fallback;
+  return v.toLowerCase() === 'true' || v === '1';
+}
+
+export interface SenderIdentity {
+  company: string;
+  product: string;
+  person: string;
+  email: string;
+  phone: string;
+}
+
+export interface AppConfig {
+  dbPath: string;
+  artifactsDir: string;
+  sender: SenderIdentity;
+  anthropicApiKey: string | null;
+  llmModel: string;
+  dailySendLimit: number;
+  sendWindowStart: number;
+  sendWindowEnd: number;
+  sendMinIntervalMs: number;
+  sendMaxIntervalMs: number;
+  headless: boolean;
+}
+
+export const config: AppConfig = {
+  dbPath: resolve(ROOT, envStr('DB_PATH', './data/app.db')),
+  artifactsDir: resolve(ROOT, envStr('ARTIFACTS_DIR', './artifacts')),
+  sender: {
+    company: envStr('SENDER_COMPANY', 'ネオキャリア株式会社'),
+    product: envStr('SENDER_PRODUCT', 'MOCHICA'),
+    person: envStr('SENDER_PERSON', ''),
+    email: envStr('SENDER_EMAIL', ''),
+    phone: envStr('SENDER_PHONE', ''),
+  },
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
+  llmModel: envStr('LLM_MODEL', 'claude-sonnet-5'),
+  dailySendLimit: envInt('DAILY_SEND_LIMIT', 200),
+  sendWindowStart: envInt('SEND_WINDOW_START', 9),
+  sendWindowEnd: envInt('SEND_WINDOW_END', 19),
+  sendMinIntervalMs: envInt('SEND_MIN_INTERVAL_MS', 45000),
+  sendMaxIntervalMs: envInt('SEND_MAX_INTERVAL_MS', 120000),
+  headless: envBool('HEADLESS', true),
+};
+
+export interface IcpConfig {
+  employees: { min: number; max: number };
+  targetIndustries: string[];
+  signals: string[];
+  excludeKeywords: string[];
+  competitorAts: string[];
+}
+
+export function loadIcp(): IcpConfig {
+  const raw = readFileSync(resolve(ROOT, 'config/icp.json'), 'utf8');
+  return JSON.parse(raw) as IcpConfig;
+}

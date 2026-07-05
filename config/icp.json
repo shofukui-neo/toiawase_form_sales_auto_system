@@ -1,0 +1,16 @@
+{
+  "_comment": "MOCHICA ICP (spec §4-L0). Used for scoring an ingested [name, domain] list. Values are defaults from the spec §13-1 and can be tuned. Excludes are hard filters (score -> 0 -> SUPPRESSED as 'competitor'/policy).",
+  "employees": { "min": 50, "max": 1000 },
+  "targetIndustries": [
+    "福祉", "介護", "建設", "小売", "飲食", "運輸", "製造", "物流", "サービス", "地方", "JA", "農業協同組合"
+  ],
+  "signals": [
+    "マイナビ", "リクナビ", "新卒", "採用", "エントリー"
+  ],
+  "excludeKeywords": [
+    "採用代行", "RPO", "フル委託"
+  ],
+  "competitorAts": [
+    "HERP", "sonar", "ジョブカン採用", "i-web", "採用一括かんりくん", "ジョブスイート", "HRMOS"
+  ]
+}
