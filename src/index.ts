@@ -129,11 +129,26 @@ program
 
 program
   .command('report')
-  .description('L6 — export CSV report + suppression list')
-  .action(() => {
+  .description('L6 — export CSV report + suppression list (--sheets to also sync to Google Sheets)')
+  .option('--sheets', 'also sync report + suppression to the configured Google Sheet', false)
+  .action(async (o: { sheets: boolean }) => {
     const r = exportReport();
     const s = exportSuppression();
     console.log(`report: ${r}\nsuppression: ${s}`);
+    if (o.sheets) {
+      const { syncSheets } = await import('./layers/l6_sheets.js');
+      const res = await syncSheets();
+      console.log(res.synced ? `Sheets: synced report=${res.reportRows} suppression=${res.suppressionRows}` : `Sheets: skipped (${res.reason})`);
+    }
+  });
+
+program
+  .command('serve')
+  .description('A — launch the web approval dashboard')
+  .option('-p, --port <n>', 'port', '4599')
+  .action(async (o: { port: string }) => {
+    const { serve } = await import('./web/server.js');
+    serve(Number(o.port));
   });
 
 program

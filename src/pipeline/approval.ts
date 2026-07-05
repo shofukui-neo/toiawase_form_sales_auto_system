@@ -38,6 +38,29 @@ export function listPending(limit = 100): PendingItem[] {
   });
 }
 
+export interface ApprovedItem {
+  companyId: number;
+  name: string;
+  domain: string;
+  gate: string;
+  approvedBy: string | null;
+}
+
+/** Companies approved and waiting to be sent (or mid-send). */
+export function listApproved(limit = 100): ApprovedItem[] {
+  return [...companies.byStatus('APPROVED', limit), ...companies.byStatus('SUBMITTING', limit)].map((c) => {
+    const sub = submissions.latestForCompany(c.id);
+    const schema = fieldMaps.latest(c.id);
+    return {
+      companyId: c.id,
+      name: c.name,
+      domain: c.domain,
+      gate: schema?.gate ?? 'unknown',
+      approvedBy: sub?.approved_by ?? null,
+    };
+  });
+}
+
 export function approve(companyId: number, approver: string): void {
   const company = companies.byId(companyId);
   if (!company) throw new Error(`company ${companyId} not found`);

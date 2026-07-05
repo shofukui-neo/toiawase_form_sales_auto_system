@@ -43,6 +43,12 @@ export interface AppConfig {
   sendMinIntervalMs: number;
   sendMaxIntervalMs: number;
   headless: boolean;
+  sheets: {
+    spreadsheetId: string | null;
+    keyFile: string | null; // service-account JSON path
+    reportTab: string;
+    suppressionTab: string;
+  };
 }
 
 export const config: AppConfig = {
@@ -63,6 +69,12 @@ export const config: AppConfig = {
   sendMinIntervalMs: envInt('SEND_MIN_INTERVAL_MS', 45000),
   sendMaxIntervalMs: envInt('SEND_MAX_INTERVAL_MS', 120000),
   headless: envBool('HEADLESS', true),
+  sheets: {
+    spreadsheetId: process.env.SHEETS_SPREADSHEET_ID || null,
+    keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS || null,
+    reportTab: envStr('SHEETS_REPORT_TAB', 'report'),
+    suppressionTab: envStr('SHEETS_SUPPRESSION_TAB', 'suppression'),
+  },
 };
 
 export interface IcpConfig {

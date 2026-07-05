@@ -1,6 +1,8 @@
 import * as cheerio from 'cheerio';
 import { XMLParser } from 'fast-xml-parser';
 import { baseUrl, resolveUrl, sameSite } from '../utils/url.js';
+import { BrowserSession } from '../browser/browser.js';
+import { extractFields } from '../browser/extract.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L1');
@@ -10,38 +12,20 @@ const UA =
 
 /** 1. Common contact paths, cheapest first (spec §4-L1 step 1). */
 const COMMON_PATHS = [
-  '/contact',
-  '/contact/',
-  '/contact-us',
-  '/contact-us/',
-  '/inquiry',
-  '/inquiry/',
-  '/otoiawase',
-  '/toiawase',
-  '/otoiawase/',
-  '/form',
-  '/form/',
-  '/contact.html',
-  '/inquiry.html',
-  '/support/contact',
-  '/company/contact',
+  '/contact', '/contact/', '/contact-us', '/contact-us/', '/inquiry', '/inquiry/',
+  '/otoiawase', '/toiawase', '/otoiawase/', '/form', '/form/', '/contact.html',
+  '/inquiry.html', '/support/contact', '/company/contact', '/contact/form/', '/contact/form',
 ];
 
 /** 2. Link text signals to follow from the homepage. */
 const LINK_SIGNALS = [
-  'お問い合わせ',
-  'お問合せ',
-  '問合せ',
-  'お問い合せ',
-  'コンタクト',
-  'contact',
-  'inquiry',
-  'ご相談',
-  'お見積',
-  '資料請求',
+  'お問い合わせ', 'お問合せ', '問合せ', 'お問い合せ', 'コンタクト', 'contact',
+  'inquiry', 'ご相談', 'お見積', '資料請求', 'デモ', 'お申し込み',
 ];
 
-export type DiscoveryMethod = 'common_path' | 'link_scan' | 'sitemap' | 'none';
+const CONTACTISH = /contact|inquiry|toiawase|otoiawase|form|soudan|shiryou|entry|demo/i;
+
+export type DiscoveryMethod = 'common_path' | 'link_scan' | 'sitemap' | 'browser_render' | 'none';
 
 export interface DiscoveryResult {
   formUrl: string | null;
@@ -64,10 +48,6 @@ async function fetchPage(url: string, timeoutMs = 12000): Promise<FetchedPage | 
       redirect: 'follow',
       headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' },
     });
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.includes('html') && !ct.includes('xml')) {
-      // Still return for sitemap xml callers; they pass through.
-    }
     const html = await res.text();
     return { url: res.url || url, status: res.status, html };
   } catch (e) {
@@ -78,116 +58,185 @@ async function fetchPage(url: string, timeoutMs = 12000): Promise<FetchedPage | 
   }
 }
 
-/** True when the HTML contains a real form with a message-like textarea (spec §4-L1 step 4). */
-function hasRealForm(html: string): { form: boolean; textarea: boolean } {
+interface FormSignals {
+  hasForm: boolean;
+  hasTextarea: boolean;
+  fillableCount: number; // text/email/tel/textarea/select inputs (excludes hidden/search/submit)
+}
+
+/** Static (cheerio) form signal count for the largest form on the page. */
+function staticFormSignals(html: string): FormSignals {
   const $ = cheerio.load(html);
   const forms = $('form');
-  let hasTextarea = false;
+  if (forms.length === 0) return { hasForm: false, hasTextarea: false, fillableCount: 0 };
+  let best = { hasForm: true, hasTextarea: false, fillableCount: 0 };
   forms.each((_, el) => {
-    if ($(el).find('textarea').length > 0) hasTextarea = true;
-  });
-  return { form: forms.length > 0, textarea: hasTextarea };
-}
-
-/** Confidence heuristic for a confirmed form page. */
-function scoreForm(url: string, real: { form: boolean; textarea: boolean }, method: DiscoveryMethod): number {
-  let s = 0;
-  if (real.form) s += 0.5;
-  if (real.textarea) s += 0.3;
-  if (/contact|inquiry|toiawase|otoiawase|form/i.test(url)) s += 0.1;
-  if (method === 'common_path') s += 0.1;
-  else if (method === 'link_scan') s += 0.05;
-  return Math.min(1, Number(s.toFixed(3)));
-}
-
-async function tryCommonPaths(domain: string): Promise<DiscoveryResult | null> {
-  const base = baseUrl(domain);
-  for (const p of COMMON_PATHS) {
-    const url = base + p;
-    const page = await fetchPage(url);
-    if (!page || page.status >= 400) continue;
-    const real = hasRealForm(page.html);
-    if (real.form && real.textarea) {
-      return { formUrl: page.url, confidence: scoreForm(page.url, real, 'common_path'), method: 'common_path' };
+    const $f = $(el);
+    const textareas = $f.find('textarea').length;
+    let fillable = textareas;
+    $f.find('input').each((__, inp) => {
+      const type = ($(inp).attr('type') || 'text').toLowerCase();
+      if (['text', 'email', 'tel', 'url', 'number'].includes(type)) fillable++;
+    });
+    fillable += $f.find('select').length;
+    if (fillable > best.fillableCount) {
+      best = { hasForm: true, hasTextarea: textareas > 0, fillableCount: fillable };
     }
-  }
-  return null;
+  });
+  return best;
 }
 
-async function tryLinkScan(domain: string): Promise<DiscoveryResult | null> {
+/** Is this a real contact form (not a lone search/newsletter box)? */
+function looksLikeContactForm(s: FormSignals): boolean {
+  if (!s.hasForm) return false;
+  return s.hasTextarea || s.fillableCount >= 3;
+}
+
+function scoreForm(url: string, s: FormSignals, method: DiscoveryMethod): number {
+  let score = 0.4;
+  if (s.hasTextarea) score += 0.3;
+  if (s.fillableCount >= 4) score += 0.1;
+  if (CONTACTISH.test(url)) score += 0.12;
+  if (method === 'common_path') score += 0.08;
+  else if (method === 'browser_render') score += 0.05;
+  return Math.min(1, Number(score.toFixed(3)));
+}
+
+/** Collect contact-ish candidate URLs (200 OK) from all static stages. */
+async function collectCandidates(domain: string): Promise<{ url: string; page: FetchedPage; method: DiscoveryMethod }[]> {
   const base = baseUrl(domain);
+  const seen = new Set<string>();
+  const out: { url: string; page: FetchedPage; method: DiscoveryMethod }[] = [];
+
+  const add = async (url: string, method: DiscoveryMethod) => {
+    if (seen.has(url)) return;
+    seen.add(url);
+    const page = await fetchPage(url);
+    if (page && page.status < 400) out.push({ url: page.url, page, method });
+  };
+
+  // 1. common paths
+  for (const p of COMMON_PATHS) await add(base + p, 'common_path');
+
+  // 2. homepage link scan
   const home = await fetchPage(base);
-  if (!home) return null;
-  const $ = cheerio.load(home.html);
-  const candidates: string[] = [];
-  $('a[href]').each((_, el) => {
-    const text = ($(el).text() || '') + ' ' + ($(el).attr('title') || '') + ' ' + ($(el).attr('aria-label') || '');
-    const href = $(el).attr('href') || '';
-    const matches = LINK_SIGNALS.some((sig) => text.toLowerCase().includes(sig.toLowerCase()) || href.toLowerCase().includes(sig.toLowerCase()));
-    if (!matches) return;
-    const abs = resolveUrl(href, home.url);
-    if (abs && sameSite(abs, domain) && !candidates.includes(abs)) candidates.push(abs);
-  });
-
-  for (const url of candidates.slice(0, 8)) {
-    const page = await fetchPage(url);
-    if (!page || page.status >= 400) continue;
-    const real = hasRealForm(page.html);
-    if (real.form && real.textarea) {
-      return { formUrl: page.url, confidence: scoreForm(page.url, real, 'link_scan'), method: 'link_scan' };
-    }
+  if (home) {
+    const $ = cheerio.load(home.html);
+    const links: string[] = [];
+    $('a[href]').each((_, el) => {
+      const text = `${$(el).text()} ${$(el).attr('title') || ''} ${$(el).attr('aria-label') || ''}`.toLowerCase();
+      const href = $(el).attr('href') || '';
+      if (LINK_SIGNALS.some((s) => text.includes(s.toLowerCase()) || href.toLowerCase().includes(s.toLowerCase()))) {
+        const abs = resolveUrl(href, home.url);
+        if (abs && sameSite(abs, domain) && !links.includes(abs)) links.push(abs);
+      }
+    });
+    for (const u of links.slice(0, 8)) await add(u, 'link_scan');
   }
-  return null;
+
+  // 3. sitemap
+  const sm = await fetchPage(`${base}/sitemap.xml`);
+  if (sm && sm.status < 400) {
+    try {
+      const parser = new XMLParser({ ignoreAttributes: false });
+      const doc = parser.parse(sm.html);
+      const locs: string[] = [];
+      const collect = (node: any) => {
+        if (!node) return;
+        if (Array.isArray(node)) node.forEach(collect);
+        else if (typeof node === 'object') {
+          if (typeof node.loc === 'string') locs.push(node.loc);
+          Object.values(node).forEach(collect);
+        }
+      };
+      collect(doc);
+      for (const u of locs.filter((x) => CONTACTISH.test(x) && sameSite(x, domain)).slice(0, 6)) {
+        await add(u, 'sitemap');
+      }
+    } catch { /* ignore malformed sitemap */ }
+  }
+
+  return out;
 }
 
-async function trySitemap(domain: string): Promise<DiscoveryResult | null> {
-  const base = baseUrl(domain);
-  const sm = await fetchPage(`${base}/sitemap.xml`);
-  if (!sm || sm.status >= 400) return null;
-  let urls: string[] = [];
+/** Browser-render a candidate URL and check for a real form (catches SPA/JS forms). */
+async function browserConfirm(urls: string[]): Promise<DiscoveryResult | null> {
+  if (urls.length === 0) return null;
+  const session = new BrowserSession({ seed: 7 });
   try {
-    const parser = new XMLParser({ ignoreAttributes: false });
-    const doc = parser.parse(sm.html);
-    const locs: string[] = [];
-    const collect = (node: any) => {
-      if (!node) return;
-      if (Array.isArray(node)) node.forEach(collect);
-      else if (typeof node === 'object') {
-        if (typeof node.loc === 'string') locs.push(node.loc);
-        Object.values(node).forEach(collect);
+    const page = await session.open();
+    for (const url of urls.slice(0, 3)) {
+      try {
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
+        const fields = await extractFields(page);
+        const fillable = fields.filter((f) => !f.honeypot && (f.type || '') !== 'hidden');
+        const hasTextarea = fillable.some((f) => f.tag === 'textarea');
+        const signals: FormSignals = {
+          hasForm: fillable.length > 0,
+          hasTextarea,
+          fillableCount: fillable.length,
+        };
+        if (looksLikeContactForm(signals)) {
+          const finalUrl = page.url();
+          return { formUrl: finalUrl, confidence: scoreForm(finalUrl, signals, 'browser_render'), method: 'browser_render' };
+        }
+      } catch (e) {
+        log.debug(`browser render failed ${url}: ${(e as Error).message}`);
       }
-    };
-    collect(doc);
-    urls = locs;
-  } catch {
-    return null;
-  }
-  const contactish = urls.filter((u) => /contact|inquiry|toiawase|otoiawase|form/i.test(u)).slice(0, 8);
-  for (const url of contactish) {
-    if (!sameSite(url, domain)) continue;
-    const page = await fetchPage(url);
-    if (!page || page.status >= 400) continue;
-    const real = hasRealForm(page.html);
-    if (real.form && real.textarea) {
-      return { formUrl: page.url, confidence: scoreForm(page.url, real, 'sitemap'), method: 'sitemap' };
     }
+    return null;
+  } finally {
+    await session.close();
   }
-  return null;
+}
+
+export interface DiscoverOptions {
+  /** Enable the (expensive) Playwright render fallback for SPA forms. Default true. */
+  browserFallback?: boolean;
 }
 
 /**
- * L1 — discover the contact form URL for a domain. Staged, cost-ordered; stops
- * at the first confirmed form (spec §4-L1). Returns FORM_NOT_FOUND-equivalent
- * (formUrl null) when nothing is confirmed — an expected, non-error outcome.
+ * L1 — discover the contact form URL for a domain (spec §4-L1). Static, cost-
+ * ordered candidate collection first; confirms the cheapest passing candidate.
+ * Falls back to a Playwright render pass for JS/SPA forms that static fetch
+ * cannot see. Returns formUrl=null (FORM_NOT_FOUND) as an expected outcome.
  */
-export async function discoverForm(domain: string): Promise<DiscoveryResult> {
-  for (const stage of [tryCommonPaths, tryLinkScan, trySitemap]) {
-    const r = await stage(domain);
-    if (r) {
-      log.info(`${domain} -> ${r.formUrl} (${r.method}, conf=${r.confidence})`);
-      return r;
+export async function discoverForm(domain: string, opts: DiscoverOptions = {}): Promise<DiscoveryResult> {
+  const candidates = await collectCandidates(domain);
+
+  // Static confirmation, preferring cheaper methods and stronger signals.
+  const order: DiscoveryMethod[] = ['common_path', 'link_scan', 'sitemap'];
+  let best: DiscoveryResult | null = null;
+  for (const c of candidates) {
+    const s = staticFormSignals(c.page.html);
+    if (!looksLikeContactForm(s)) continue;
+    const conf = scoreForm(c.url, s, c.method);
+    if (!best || conf > best.confidence || order.indexOf(c.method) < order.indexOf(best.method)) {
+      best = { formUrl: c.url, confidence: conf, method: c.method };
     }
   }
+  if (best) {
+    log.info(`${domain} -> ${best.formUrl} (${best.method}, conf=${best.confidence})`);
+    return best;
+  }
+
+  // Browser fallback on the most contact-ish candidates (SPA forms live here).
+  if (opts.browserFallback !== false) {
+    let targets = candidates.map((c) => c.url).filter((u) => CONTACTISH.test(u));
+    if (targets.length === 0) targets = candidates.map((c) => c.url);
+    // If static fetch was fully blocked (no candidates at all, e.g. bot-walled
+    // sites), still try rendering the common contact paths with a real browser.
+    if (targets.length === 0) {
+      const base = baseUrl(domain);
+      targets = ['/contact/', '/contact', '/inquiry/', '/otoiawase/', '/'].map((p) => base + p);
+    }
+    const rendered = await browserConfirm(targets);
+    if (rendered) {
+      log.info(`${domain} -> ${rendered.formUrl} (browser_render, conf=${rendered.confidence})`);
+      return rendered;
+    }
+  }
+
   log.info(`${domain} -> FORM_NOT_FOUND`);
   return { formUrl: null, confidence: 0, method: 'none' };
 }

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>フォーム営業 承認ダッシュボード</title>
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #fff; --fg: #1c1f23; --muted: #6b7280;
+      --line: #e5e7eb; --accent: #2563eb; --ok: #16a34a; --warn: #d97706;
+      --danger: #dc2626; --block: #7c3aed;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#0f1115; --card:#181b21; --fg:#e6e8eb; --muted:#9aa2ad;
+        --line:#262b33; --accent:#3b82f6; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+      background: var(--bg); color: var(--fg); }
+    header { position: sticky; top: 0; background: var(--card); border-bottom: 1px solid var(--line);
+      padding: 12px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; z-index: 10; }
+    header h1 { font-size: 16px; margin: 0; font-weight: 700; }
+    .counts { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+    .counts b { color: var(--fg); }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+      margin: 24px 0 10px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+      margin-bottom: 14px; display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
+    @media (max-width: 720px) { .card { grid-template-columns: 1fr; } }
+    .shot { width: 100%; border: 1px solid var(--line); border-radius: 8px; max-height: 360px; object-fit: cover;
+      object-position: top; background: #0002; cursor: zoom-in; }
+    .meta h2 { font-size: 15px; margin: 0 0 4px; }
+    .meta .domain { color: var(--muted); font-size: 13px; margin-bottom: 8px; word-break: break-all; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
+      color: #fff; }
+    .g-high { background: var(--ok); } .g-mid { background: var(--warn); }
+    .g-low { background: var(--danger); } .g-block { background: var(--block); }
+    .kv { font-size: 12px; color: var(--muted); margin: 6px 0; }
+    .body { white-space: pre-wrap; font-size: 12px; background: #0000000a; border: 1px solid var(--line);
+      border-radius: 8px; padding: 10px; margin-top: 10px; max-height: 200px; overflow: auto; }
+    @media (prefers-color-scheme: dark) { .body { background: #ffffff08; } }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    button { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+      background: var(--card); color: var(--fg); cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.ok { background: var(--ok); color: #fff; border-color: var(--ok); }
+    button.danger { color: var(--danger); }
+    button:disabled { opacity: .5; cursor: default; }
+    .empty { color: var(--muted); padding: 30px; text-align: center; }
+    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #111827;
+      color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s;
+      pointer-events: none; }
+    .toast.show { opacity: 1; }
+    a.formlink { color: var(--accent); font-size: 12px; }
+    dialog { border: none; border-radius: 12px; padding: 0; max-width: 92vw; background: transparent; }
+    dialog img { max-width: 92vw; max-height: 88vh; border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📮 フォーム営業 承認ダッシュボード</h1>
+    <div class="counts" id="counts"></div>
+    <button id="refresh" style="margin-left:auto">再読込</button>
+  </header>
+  <div class="wrap">
+    <div class="section-title">承認待ち（PENDING_APPROVAL）</div>
+    <div id="pending"></div>
+    <div class="section-title">承認済み・送信可（APPROVED）</div>
+    <div id="approved"></div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <dialog id="lightbox"><img id="lbimg" src="" alt="preview" /></dialog>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    const toast = (msg) => { const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2200); };
+    const esc = (s) => (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+    async function api(path, method = 'GET', body) {
+      const res = await fetch(path, { method,
+        headers: body ? { 'content-type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined });
+      if (!res.ok) { const t = await res.text(); throw new Error(t || res.status); }
+      return res.headers.get('content-type')?.includes('json') ? res.json() : res.text();
+    }
+
+    function gateBadge(g) { return `<span class="badge g-${g}">gate: ${g}</span>`; }
+
+    function pendingCard(it) {
+      const shot = it.screenshot ? `/artifacts/${it.screenshot.split(/[\\\/]/).pop()}` : '';
+      return `<div class="card" data-id="${it.companyId}">
+        <div>${shot ? `<img class="shot" src="${shot}" onclick="zoom('${shot}')">`
+          : '<div class="empty">スクショなし</div>'}</div>
+        <div class="meta">
+          <h2>#${it.companyId} ${esc(it.name)} ${gateBadge(it.gate)}</h2>
+          <div class="domain">${esc(it.domain)}</div>
+          <div class="kv">マッピング信頼度: <b>${it.mappingConfidence}</b></div>
+          <div class="kv"><a class="formlink" href="${esc(it.formUrl||'')}" target="_blank" rel="noopener">${esc(it.formUrl||'(no form)')}</a></div>
+          <details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">送信文面を表示</summary>
+            <div class="body">${esc(it.renderedBody)}</div></details>
+          <div class="actions">
+            <button class="ok" onclick="act(${it.companyId},'approve')">承認</button>
+            <button class="primary" onclick="act(${it.companyId},'approve-execute')">承認して即送信</button>
+            <button class="danger" onclick="act(${it.companyId},'reject')">却下</button>
+            <button onclick="suppress(${it.companyId})">抑制</button>
+          </div>
+        </div></div>`;
+    }
+
+    function approvedCard(it) {
+      return `<div class="card" data-id="${it.companyId}" style="grid-template-columns:1fr">
+        <div class="meta">
+          <h2>#${it.companyId} ${esc(it.name)} ${gateBadge(it.gate)}</h2>
+          <div class="domain">${esc(it.domain)} — 承認者: ${esc(it.approvedBy||'-')}</div>
+          <div class="actions">
+            <button class="primary" onclick="act(${it.companyId},'execute')">送信実行</button>
+          </div>
+        </div></div>`;
+    }
+
+    async function load() {
+      const [status, pending, approved] = await Promise.all([
+        api('/api/status'), api('/api/pending'), api('/api/approved') ]);
+      $('#counts').innerHTML = Object.entries(status).map(([k,v]) => `${k}: <b>${v}</b>`).join(' · ');
+      $('#pending').innerHTML = pending.length ? pending.map(pendingCard).join('')
+        : '<div class="empty">承認待ちはありません</div>';
+      $('#approved').innerHTML = approved.length ? approved.map(approvedCard).join('')
+        : '<div class="empty">承認済みはありません</div>';
+    }
+
+    async function act(id, action) {
+      try {
+        if (action === 'approve') { await api(`/api/companies/${id}/approve`, 'POST'); toast(`#${id} を承認しました`); }
+        else if (action === 'reject') { await api(`/api/companies/${id}/reject`, 'POST'); toast(`#${id} を却下しました`); }
+        else if (action === 'execute') { toast(`#${id} 送信中…`); const r = await api(`/api/companies/${id}/execute`, 'POST'); toast(`#${id}: ${r.status} (${r.detail||''})`.slice(0,80)); }
+        else if (action === 'approve-execute') { await api(`/api/companies/${id}/approve`, 'POST'); toast(`#${id} 送信中…`); const r = await api(`/api/companies/${id}/execute`, 'POST'); toast(`#${id}: ${r.status}`); }
+        await load();
+      } catch (e) { toast('エラー: ' + e.message.slice(0,80)); }
+    }
+
+    async function suppress(id) {
+      const reason = prompt('抑制理由を選択: opt_out / no_sales_policy / competitor / already_sent', 'opt_out');
+      if (!reason) return;
+      try { await api(`/api/companies/${id}/suppress`, 'POST', { reason }); toast(`#${id} を抑制しました`); await load(); }
+      catch (e) { toast('エラー: ' + e.message.slice(0,80)); }
+    }
+
+    function zoom(src) { $('#lbimg').src = src; $('#lightbox').showModal(); }
+    $('#lightbox').addEventListener('click', () => $('#lightbox').close());
+    $('#refresh').addEventListener('click', load);
+    load();
+    setInterval(load, 15000);
+  </script>
+</body>
+</html>

@@ -25,11 +25,13 @@ function toCsv(headers: string[], rows: unknown[][]): string {
   return `${head}\n${body}\n`;
 }
 
-/** Export the master report: one row per company with its latest submission. */
-export function exportReport(outPath?: string): string {
-  const dest = outPath ?? resolve(config.artifactsDir, 'report.csv');
-  mkdirSync(config.artifactsDir, { recursive: true });
+export interface Table {
+  headers: string[];
+  rows: unknown[][];
+}
 
+/** Build the master report table (shared by CSV export and Sheets sync). */
+export function buildReportTable(): Table {
   const headers = [
     'company_id', 'name', 'domain', 'icp_score', 'status', 'form_url', 'form_confidence',
     'submission_status', 'approved_by', 'submitted_at', 'result_detail', 'plan_screenshot',
@@ -42,7 +44,22 @@ export function exportReport(outPath?: string): string {
       sub?.result_detail ?? '', sub?.plan_screenshot_url ?? '',
     ];
   });
+  return { headers, rows };
+}
 
+/** Build the suppression table. */
+export function buildSuppressionTable(): Table {
+  return {
+    headers: ['domain', 'reason', 'created_at'],
+    rows: suppression.all().map((s) => [s.domain, s.reason, s.created_at]),
+  };
+}
+
+/** Export the master report: one row per company with its latest submission. */
+export function exportReport(outPath?: string): string {
+  const dest = outPath ?? resolve(config.artifactsDir, 'report.csv');
+  mkdirSync(config.artifactsDir, { recursive: true });
+  const { headers, rows } = buildReportTable();
   writeFileSync(dest, toCsv(headers, rows), 'utf8');
   log.info(`report exported: ${dest} (${rows.length} companies)`);
   return dest;
@@ -52,8 +69,8 @@ export function exportReport(outPath?: string): string {
 export function exportSuppression(outPath?: string): string {
   const dest = outPath ?? resolve(config.artifactsDir, 'suppression.csv');
   mkdirSync(config.artifactsDir, { recursive: true });
-  const rows = suppression.all().map((s) => [s.domain, s.reason, s.created_at]);
-  writeFileSync(dest, toCsv(['domain', 'reason', 'created_at'], rows), 'utf8');
+  const { headers, rows } = buildSuppressionTable();
+  writeFileSync(dest, toCsv(headers, rows), 'utf8');
   log.info(`suppression exported: ${dest} (${rows.length} rows)`);
   return dest;
 }
