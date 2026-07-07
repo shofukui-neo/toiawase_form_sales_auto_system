@@ -35,6 +35,31 @@ cp .env.example .env         # 送信者情報・ペーシング等を設定
 `.env` の `SENDER_*` は必ず正しい値に（コンプラ§9: 送信元の明示は必須）。
 `ANTHROPIC_API_KEY` は任意（未設定でも L2 はルールベースで動作、曖昧項目のLLM補完のみ無効）。
 
+> **Node のバージョン**: `better-sqlite3` はネイティブモジュール。Node を上げて
+> `NODE_MODULE_VERSION` の不一致（`ERR_DLOPEN_FAILED`）が出たら `npm install better-sqlite3@latest`
+> でプレビルドを取り直すか、C++ ビルドツール導入後に `npm rebuild better-sqlite3`。
+
+## クイックスタート（サンプルデータで動作確認）
+
+外部ネットワーク・APIキー不要。1コマンドでデモDBを作り、営業パイプラインの
+各状態（承認待ち／承認済み／送信成功／送信失敗／抑制／未検出／新規）をまとめて投入する。
+承認待ちには**本物の確認画面スクショ**が付くので、ダッシュボードのプレビューがそのまま出る。
+
+```bash
+npm run seed                 # デモDBをリセットしてサンプル9社を投入（数分・ブラウザ実操作）
+npm run serve                # http://localhost:4599 で承認ダッシュボードを確認
+npm run cli -- status        # 状態別の件数
+npm run cli -- pending       # 承認待ち一覧（スクショパス）
+npm run cli -- report        # artifacts/report.csv / suppression.csv を出力
+```
+
+投入内容（[scripts/seed_demo.ts](scripts/seed_demo.ts)）は、ローカルのテストフォームサーバ
+（確認画面あり2段 / 1段）に対して実パイプライン（L2→L3→L4 Plan/Execute）を実際に走らせている。
+ダッシュボードの「送信実行 / 承認して即送信」を**ライブで**試す場合は、別ターミナルで
+`npm run testform`（8787番に常駐）を起動しておくと、投入済み `form_url`（127.0.0.1:8787）へ
+実送信できる。※最終送信は**送信可能時間帯**（`.env` の `SEND_WINDOW_START`〜`END`、既定 9–19時）
+かつ日次上限内でのみ実行される（ペーシング §9。時間外は `_送信可: 0` となり実行はスキップされる）。
+
 ## 使い方（P1 半自動フロー）
 
 ```bash

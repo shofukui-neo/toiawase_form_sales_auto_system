@@ -15,11 +15,12 @@
     "discover-batch": "tsx scripts/discovery_batch.ts",
     "postinstall": "playwright install chromium",
     "testform": "tsx scripts/test_form_server.ts",
+    "seed": "tsx scripts/seed_demo.ts",
     "e2e": "tsx scripts/e2e_local.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
-    "better-sqlite3": "^11.7.0",
+    "better-sqlite3": "^12.11.1",
     "cheerio": "^1.0.0",
     "commander": "^12.1.0",
     "dotenv": "^16.4.7",

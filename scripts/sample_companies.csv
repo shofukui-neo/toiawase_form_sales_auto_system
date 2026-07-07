@@ -1,4 +1,10 @@
 name,domain,industry,employees,source
 サンプル介護サービス株式会社,https://example.com,介護,320,マイナビ
-テスト建設工業,https://example.org,建設,180,リクナビ
+テスト建設工業株式会社,https://example.org,建設,180,リクナビ
+サンプル物流ソリューションズ株式会社,https://example.net,物流,95,新卒採用
+サンプル小売チェーン株式会社,https://sample-retail.example.jp,小売,450,マイナビ
+サンプル製造テック株式会社,https://sample-mfg.example.jp,製造,260,エントリー
+サンプル飲食グループ株式会社,https://sample-food.example.jp,飲食,70,リクナビ
+規模外の大企業ホールディングス,https://too-big.example.jp,サービス,5000,マイナビ
 競合ツール導入済み社,https://competitor-example.com,製造,500,HERP
+採用代行フル委託サービス社,https://rpo-example.com,サービス,120,採用代行
