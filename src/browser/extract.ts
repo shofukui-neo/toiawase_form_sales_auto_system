@@ -75,6 +75,14 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
         const lab = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
         if (lab && lab.textContent) return lab.textContent.trim();
       }
+      // 2. title / data-label / aria metadata common in JS-driven forms
+      const meta = [
+        el.getAttribute('title'),
+        el.getAttribute('data-label'),
+        el.getAttribute('data-name'),
+        el.getAttribute('aria-label'),
+      ].find((v) => !!v && v.trim());
+      if (meta) return meta.trim();
       // 2. wrapping label
       let p: HTMLElement | null = el.parentElement;
       let depth = 0;
@@ -83,9 +91,7 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
         depth++;
         p = p.parentElement;
       }
-      // 3. aria-label / aria-labelledby
-      const aria = el.getAttribute('aria-label');
-      if (aria) return aria.trim();
+      // 3. aria-labelledby
       const labelledby = el.getAttribute('aria-labelledby');
       if (labelledby) {
         const ref = document.getElementById(labelledby);

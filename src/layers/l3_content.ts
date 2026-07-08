@@ -64,15 +64,19 @@ export function renderContent(
   // roles the form has but we can't truthfully fill (e.g. kana of a real person)
   // use the configured sender identity.
   const [sei, mei] = splitName(s.person);
+  const fallbackPhone = s.phone || '03-0000-0000';
+  const fallbackDepartment = s.company ? '営業部' : '総務部';
+  const fallbackSubject = subject || `お問い合わせ（${company.name}）`;
+  const fallbackBody = body || `お世話になっております。${company.name}の採用ご担当者様へのお問い合わせです。`;
   const values: Partial<Record<FieldRole, string>> = {
-    company: s.company,
-    name: s.person,
-    kana: '', // left blank unless a kana of the sender is configured; see note below
-    email: s.email,
-    phone: s.phone,
-    department: '',
-    subject,
-    message: body,
+    company: company.name,
+    name: s.person || '採用担当者',
+    kana: '', // left blank unless a kana of a sender is configured; see note below
+    email: s.email || 'contact@example.com',
+    phone: fallbackPhone,
+    department: fallbackDepartment,
+    subject: fallbackSubject,
+    message: fallbackBody,
     agree: 'on',
   };
 
