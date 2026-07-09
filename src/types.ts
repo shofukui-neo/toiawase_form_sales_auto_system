@@ -45,6 +45,7 @@ export type FieldRole =
   | 'subject' // 件名
   | 'message' // 本文
   | 'agree' // 同意 (checkbox)
+  | 'choice' // 必須の select / radio（種別など）を自動選択 (課題C)
   | 'unknown';
 
 /**
@@ -103,6 +104,12 @@ export interface FieldMapping {
   confidence: number;
   /** 'rule' | 'structure' | 'llm' — provenance for auditing. */
   source: 'rule' | 'structure' | 'llm';
+  /**
+   * Pre-resolved value chosen at parse time (role='choice' select/radio, where
+   * the value is a form-specific option label, not a sender-identity string).
+   * L4 uses this instead of the L3 rendered values map.
+   */
+  value?: string;
 }
 
 /** Full parse result for a form (persisted to field_maps). */
@@ -116,6 +123,12 @@ export interface FormSchema {
   hasHoneypot: boolean;
   /** "営業お断り" etc. detected -> compliance suppression (§9). */
   noSalesPolicy: boolean;
+  /**
+   * True when a required select/radio was auto-filled by an uncertain fallback,
+   * or a required radio group could not be confidently chosen (課題C). Caps the
+   * gate below 'high' so a human reviews the choice before any auto-send.
+   */
+  ambiguousChoice: boolean;
   mappingConfidence: number; // aggregate 0..1
   gate: Gate;
 }

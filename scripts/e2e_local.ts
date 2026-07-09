@@ -91,6 +91,10 @@ async function main() {
     check('split: name split', contentS.values.name_sei === '福井' && contentS.values.name_mei === '翔');
     check('split: kana from config', contentS.values.kana_sei === 'フクイ' && contentS.values.kana_mei === 'ショウ');
     check('split: email_confirm == email', contentS.values.email_confirm === contentS.values.email);
+    const choiceMaps = schemaS.mappings.filter((m) => m.role === 'choice');
+    check('split: required select+radio auto-selected (2 choices)', choiceMaps.length === 2, choiceMaps.map((m) => m.value).join(','));
+    check('split: choice picked neutral values (その他/法人)', choiceMaps.some((m) => m.value === 'その他') && choiceMaps.some((m) => m.value === '法人'));
+    check('split: confident choices keep gate=high (no ambiguity)', schemaS.ambiguousChoice === false && schemaS.gate === 'high', `gate=${schemaS.gate} ambiguous=${schemaS.ambiguousChoice}`);
     const execS = await executeSubmission(companyS, schemaS, contentS);
     check('split: execute succeeded (all parts validated server-side)', execS.judgment.status === 'submitted_success', execS.judgment.detail);
 

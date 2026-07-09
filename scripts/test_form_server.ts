@@ -87,6 +87,17 @@ const splitForm = page(
       </td></tr>
       <tr><th><label for="email">メールアドレス</label></th><td><input id="email" name="email" type="email" required></td></tr>
       <tr><th><label for="email2">メールアドレス（確認）</label></th><td><input id="email2" name="email2" type="email" required></td></tr>
+      <tr><th><label for="inquiry_type">お問い合わせ種別</label></th><td>
+        <select id="inquiry_type" name="inquiry_type" required>
+          <option value="">選択してください</option>
+          <option value="product">製品について</option>
+          <option value="other">その他</option>
+        </select>
+      </td></tr>
+      <tr><th>ご担当者区分</th><td>
+        <label><input type="radio" name="person_type" value="corp" required> 法人</label>
+        <label><input type="radio" name="person_type" value="personal"> 個人</label>
+      </td></tr>
       <tr><th><label for="message">お問い合わせ内容</label></th><td><textarea id="message" name="message" required></textarea></td></tr>
     </table>
     <label><input type="checkbox" name="agree" required> 個人情報の取扱いに同意する</label>
@@ -142,7 +153,7 @@ export function startServer(port = 0): Promise<{ server: Server; url: string }> 
     }
     if (req.method === 'POST' && url === '/split/complete') {
       const data = await readBody(req);
-      const need = ['company', 'sei', 'mei', 'sei_kana', 'mei_kana', 'zip1', 'zip2', 'tel1', 'tel2', 'tel3', 'email', 'email2', 'message', 'agree'];
+      const need = ['company', 'sei', 'mei', 'sei_kana', 'mei_kana', 'zip1', 'zip2', 'tel1', 'tel2', 'tel3', 'email', 'email2', 'inquiry_type', 'person_type', 'message', 'agree'];
       const missing = need.filter((k) => !data[k] || data[k].trim() === '');
       if (missing.length > 0) {
         return send(200, page('入力エラー', `<h1>入力エラー</h1><p>未入力の項目があります: ${escapeHtml(missing.join(', '))}</p>`));

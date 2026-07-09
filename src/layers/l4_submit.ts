@@ -61,6 +61,28 @@ async function fillForm(
     }
   }
 
+  // Required select/radio auto-selection (課題C). Value was resolved at parse
+  // time and carried on the mapping.
+  for (const m of schema.mappings.filter((x) => x.role === 'choice')) {
+    const field = schema.fields.find((f) => f.selector === m.selector);
+    try {
+      if (field?.tag === 'select') {
+        const loc = page.locator(m.selector).first();
+        await loc.selectOption({ label: m.value ?? '' }).catch(async () => {
+          // label may not match exactly (whitespace/decoration) — try first real option
+          const pick = (field.options ?? []).find((o) => o && !/選択|指定なし|please|--/.test(o));
+          if (pick) await loc.selectOption({ label: pick });
+        });
+      } else {
+        // radio (or radio-like): check the chosen control
+        await page.locator(m.selector).first().check({ timeout: 5000 });
+      }
+      await session.humanDelay(120, 400);
+    } catch (e) {
+      log.warn(`choice fill failed ${m.selector}: ${(e as Error).message}`);
+    }
+  }
+
   // Consent checkboxes (agree). Check every agree-mapped box.
   for (const m of schema.mappings.filter((x) => x.role === 'agree')) {
     try {

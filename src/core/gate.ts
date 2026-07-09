@@ -84,6 +84,12 @@ export function computeGate(input: GateInput): GateResult {
 
   // ---- Tiered on confidence ----
   if (minRequiredConf >= 0.85 && formConfidence >= 0.8) {
+    // A required select/radio filled by an uncertain fallback (or a required
+    // radio left unchosen) must be seen by a human before any auto-send (課題C).
+    if (schema.ambiguousChoice) {
+      reasons.push('ambiguous-choice-needs-review');
+      return { gate: 'mid', mappingConfidence, reasons };
+    }
     reasons.push('all-required-high-confidence');
     return { gate: 'high', mappingConfidence, reasons };
   }

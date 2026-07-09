@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { DetectedField, FieldMapping, FieldRole, FormSchema } from '../types.js';
 import { ROLE_RULES } from './l2_dictionary.js';
 import { detectSplitFields } from './l2_split.js';
+import { detectChoiceFields } from './l2_choice.js';
 import { classifyAmbiguousFields } from './l2_llm.js';
 import { computeGate } from '../core/gate.js';
 import { detectNoSalesPolicy } from '../crosscutting/compliance.js';
@@ -147,6 +148,11 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       mappings.push({ role: m.role, selector: m.selector, confidence: m.confidence, source: 'llm' });
     }
 
+    // Required select/radio auto-selection (課題C), on fields nothing else claimed.
+    const mappedSelectors = new Set(mappings.map((m) => m.selector));
+    const choice = detectChoiceFields(fields, mappedSelectors);
+    mappings.push(...choice.mappings);
+
     const hasHoneypot = fields.some((f) => f.honeypot);
     const hasConfirmScreen = buttons.some((b) => b.kind === 'confirm');
     const noSalesHit = detectNoSalesPolicy(visibleText);
@@ -160,6 +166,7 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       hasCaptcha: captcha,
       hasHoneypot,
       noSalesPolicy: noSalesHit !== null,
+      ambiguousChoice: choice.ambiguous,
       mappingConfidence: 0,
       gate: 'low',
     };

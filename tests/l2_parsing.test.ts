@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ruleMap } from '../src/layers/l2_parsing.js';
 import { detectSplitFields } from '../src/layers/l2_split.js';
+import { detectChoiceFields, pickOption } from '../src/layers/l2_choice.js';
 import { renderContent } from '../src/layers/l3_content.js';
 import { config } from '../src/config.js';
 import type { DetectedField, CompanyRow, FormSchema } from '../src/types.js';
@@ -48,6 +49,7 @@ function mkSchema(): FormSchema {
     hasCaptcha: 'none',
     hasHoneypot: false,
     noSalesPolicy: false,
+    ambiguousChoice: false,
     mappingConfidence: 0.9,
     gate: 'high',
   };
@@ -102,6 +104,7 @@ test('renders non-empty fallback values for phone and department', () => {
     hasCaptcha: 'none',
     hasHoneypot: false,
     noSalesPolicy: false,
+    ambiguousChoice: false,
     mappingConfidence: 0.9,
     gate: 'high',
   };
@@ -215,6 +218,64 @@ test('parse integration: split fields + ruleMap coexist without double-mapping',
   }
   // generic phone must NOT appear (all phone boxes were split)
   assert.equal(all.includes('phone' as any), false);
+});
+
+/* ------------------- required choice select/radio (課題C) ------------------- */
+
+test('pickOption: prefers neutral keyword, skips placeholder', () => {
+  assert.deepEqual(pickOption(['選択してください', '製品について', 'その他']), { value: 'その他', confident: true });
+  assert.deepEqual(pickOption(['個人', '法人']), { value: '法人', confident: true });
+});
+
+test('pickOption: falls back to first non-placeholder (not confident)', () => {
+  assert.deepEqual(pickOption(['選択してください', '資料請求', '見積依頼']), { value: '資料請求', confident: false });
+  assert.equal(pickOption(['選択してください']), null); // nothing real
+});
+
+test('choice: required select auto-filled with neutral option', () => {
+  const sel = field({ tag: 'select', type: null, selector: '#it', required: true, labelText: 'お問い合わせ種別', options: ['選択してください', '製品について', 'その他'] });
+  const { mappings, ambiguous } = detectChoiceFields([sel], new Set());
+  assert.equal(mappings.length, 1);
+  assert.equal(mappings[0].role, 'choice');
+  assert.equal(mappings[0].value, 'その他');
+  assert.equal(ambiguous, false);
+});
+
+test('choice: fallback select flags ambiguous', () => {
+  const sel = field({ tag: 'select', type: null, selector: '#it', required: true, options: ['選択してください', '資料請求', '見積依頼'] });
+  const { mappings, ambiguous } = detectChoiceFields([sel], new Set());
+  assert.equal(mappings[0].value, '資料請求');
+  assert.equal(ambiguous, true);
+});
+
+test('choice: optional select is not touched', () => {
+  const sel = field({ tag: 'select', type: null, selector: '#it', required: false, options: ['選択してください', 'その他'] });
+  const { mappings } = detectChoiceFields([sel], new Set());
+  assert.equal(mappings.length, 0);
+});
+
+test('choice: required radio group picks keyword match (法人)', () => {
+  const r1 = field({ tag: 'input', type: 'radio', name: 'ptype', selector: '#r1', labelText: '法人', required: true });
+  const r2 = field({ tag: 'input', type: 'radio', name: 'ptype', selector: '#r2', labelText: '個人' });
+  const { mappings, ambiguous } = detectChoiceFields([r1, r2], new Set());
+  assert.equal(mappings.length, 1);
+  assert.equal(mappings[0].selector, '#r1');
+  assert.equal(mappings[0].value, '法人');
+  assert.equal(ambiguous, false);
+});
+
+test('choice: required radio with no keyword is NOT guessed (ambiguous)', () => {
+  const r1 = field({ tag: 'input', type: 'radio', name: 'q', selector: '#r1', labelText: '要介護1', required: true });
+  const r2 = field({ tag: 'input', type: 'radio', name: 'q', selector: '#r2', labelText: '要介護2' });
+  const { mappings, ambiguous } = detectChoiceFields([r1, r2], new Set());
+  assert.equal(mappings.length, 0);
+  assert.equal(ambiguous, true);
+});
+
+test('choice: already-mapped select is skipped', () => {
+  const sel = field({ tag: 'select', type: null, selector: '#dept', required: true, options: ['営業部', '総務部'] });
+  const { mappings } = detectChoiceFields([sel], new Set(['#dept']));
+  assert.equal(mappings.length, 0);
 });
 
 test('render: phone/name/kana/postal split values + email_confirm', () => {
