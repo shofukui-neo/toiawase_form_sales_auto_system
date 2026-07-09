@@ -26,15 +26,43 @@ export type CompanyStatus =
 /** Canonical field roles L2 maps form inputs onto (spec §4-L2 ①). */
 export type FieldRole =
   | 'company' // 会社名
-  | 'name' // 氏名
-  | 'kana' // フリガナ
+  | 'name' // 氏名（姓名が1欄）
+  | 'name_sei' // 姓（氏名分割）
+  | 'name_mei' // 名（氏名分割）
+  | 'kana' // フリガナ（1欄）
+  | 'kana_sei' // フリガナ 姓
+  | 'kana_mei' // フリガナ 名
   | 'email' // メール
-  | 'phone' // 電話
+  | 'email_confirm' // メール（確認再入力）
+  | 'phone' // 電話（1欄）
+  | 'phone1' // 電話 市外局番（分割1）
+  | 'phone2' // 電話 市内局番（分割2）
+  | 'phone3' // 電話 加入者番号（分割3）
+  | 'postal' // 郵便番号（1欄）
+  | 'postal1' // 郵便番号（分割1・上3桁）
+  | 'postal2' // 郵便番号（分割2・下4桁）
   | 'department' // 部署/役職
   | 'subject' // 件名
   | 'message' // 本文
   | 'agree' // 同意 (checkbox)
   | 'unknown';
+
+/**
+ * Sub-roles that are fragments of a single logical field split across multiple
+ * inputs (spec §4-L2, 課題A). Each maps to its "base" role for gate/coverage.
+ */
+export const SPLIT_TO_BASE: Partial<Record<FieldRole, FieldRole>> = {
+  name_sei: 'name',
+  name_mei: 'name',
+  kana_sei: 'kana',
+  kana_mei: 'kana',
+  phone1: 'phone',
+  phone2: 'phone',
+  phone3: 'phone',
+  postal1: 'postal',
+  postal2: 'postal',
+  email_confirm: 'email',
+};
 
 export type CaptchaKind = 'none' | 'v2' | 'v3';
 
@@ -60,6 +88,10 @@ export interface DetectedField {
   required: boolean;
   /** True when the field is visually hidden — a honeypot (spec §4-L2 ④). Never fill. */
   honeypot: boolean;
+  /** maxlength attribute (null if unset). Strong split-field signal (§4-L2 課題A). */
+  maxLength: number | null;
+  /** autocomplete token, e.g. "tel-area-code" / "postal-code" (null if unset). */
+  autocomplete: string | null;
   options?: string[]; // for <select>
 }
 

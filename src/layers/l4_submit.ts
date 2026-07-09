@@ -18,7 +18,13 @@ const log = logger('L4');
 
 /** Roles we actually type into the form (agree handled as a checkbox). */
 const TEXT_ROLES: FieldRole[] = [
-  'company', 'name', 'kana', 'email', 'phone', 'department', 'subject', 'message',
+  'company',
+  'name', 'name_sei', 'name_mei',
+  'kana', 'kana_sei', 'kana_mei',
+  'email', 'email_confirm',
+  'phone', 'phone1', 'phone2', 'phone3',
+  'postal', 'postal1', 'postal2',
+  'department', 'subject', 'message',
 ];
 
 /** Fill every mapped, non-honeypot field. Shared by Plan and Execute so text is identical. */

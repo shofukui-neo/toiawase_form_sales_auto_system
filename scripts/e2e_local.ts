@@ -12,6 +12,10 @@
 process.env.SENDER_COMPANY ||= 'ネオキャリア株式会社';
 process.env.SENDER_PERSON ||= '福井 翔';
 process.env.SENDER_EMAIL ||= 'sho.fukui@example.com';
+process.env.SENDER_PHONE ||= '03-1234-5678';
+process.env.SENDER_KANA_SEI ||= 'フクイ';
+process.env.SENDER_KANA_MEI ||= 'ショウ';
+process.env.SENDER_POSTAL ||= '150-0043';
 process.env.HEADLESS ||= 'true';
 process.env.LOG_LEVEL ||= 'info';
 
@@ -72,6 +76,23 @@ async function main() {
 
     const exec = await executeSubmission(company, schema, content);
     check('execute succeeded (2-step)', exec.judgment.status === 'submitted_success', exec.judgment.detail);
+
+    /* ---------- split-field form (課題A/B/D) ---------- */
+    console.log('\n[case] split-field form (姓名/セイメイ/郵便2分割/電話3分割/メール確認)');
+    const schemaS = await parseForm({ formUrl: `${url}/split`, formConfidence: 0.9 });
+    const rolesS = new Set(schemaS.mappings.map((m) => m.role));
+    for (const r of ['company', 'name_sei', 'name_mei', 'kana_sei', 'kana_mei', 'postal1', 'postal2', 'phone1', 'phone2', 'phone3', 'email', 'email_confirm', 'message']) {
+      check(`split: mapped ${r}`, rolesS.has(r as any), [...rolesS].join(','));
+    }
+    check('split: gate not low/block on required', schemaS.gate === 'high' || schemaS.gate === 'mid', `gate=${schemaS.gate}`);
+    const companyS = { ...mkCompany(1003), form_url: `${url}/split` };
+    const contentS = renderContent(companyS, schemaS);
+    check('split: phone split into 3 parts', contentS.values.phone1 === '03' && contentS.values.phone2 === '1234' && contentS.values.phone3 === '5678', `${contentS.values.phone1}/${contentS.values.phone2}/${contentS.values.phone3}`);
+    check('split: name split', contentS.values.name_sei === '福井' && contentS.values.name_mei === '翔');
+    check('split: kana from config', contentS.values.kana_sei === 'フクイ' && contentS.values.kana_mei === 'ショウ');
+    check('split: email_confirm == email', contentS.values.email_confirm === contentS.values.email);
+    const execS = await executeSubmission(companyS, schemaS, contentS);
+    check('split: execute succeeded (all parts validated server-side)', execS.judgment.status === 'submitted_success', execS.judgment.detail);
 
     /* ---------- 1-step form (direct submit) ---------- */
     console.log('\n[case] 1-step form (no confirm screen)');

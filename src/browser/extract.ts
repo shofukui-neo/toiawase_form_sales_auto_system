@@ -119,6 +119,8 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
         tag === 'select'
           ? Array.from(el.querySelectorAll('option')).map((o) => (o.textContent || '').trim()).filter(Boolean)
           : undefined;
+      const maxLenAttr = el.getAttribute('maxlength');
+      const maxLenNum = maxLenAttr ? parseInt(maxLenAttr, 10) : NaN;
       out.push({
         selector: cssPath(el),
         tag,
@@ -129,6 +131,8 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
         placeholder: el.getAttribute('placeholder'),
         required: el.hasAttribute('required') || el.getAttribute('aria-required') === 'true',
         honeypot: isHoneypot(el),
+        maxLength: Number.isFinite(maxLenNum) && maxLenNum > 0 ? maxLenNum : null,
+        autocomplete: el.getAttribute('autocomplete'),
         options,
       });
     }

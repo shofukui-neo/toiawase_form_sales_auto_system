@@ -29,6 +29,13 @@ export interface SenderIdentity {
   person: string;
   email: string;
   phone: string;
+  /** Katakana reading of 姓/名 for split フリガナ fields (課題B). Empty = unset. */
+  kanaSei: string;
+  kanaMei: string;
+  /** Sender company postal code, e.g. "150-0043" (課題A split郵便番号). Empty = unset. */
+  postal: string;
+  /** Department to fill when a 部署 field is required. */
+  department: string;
 }
 
 export interface AppConfig {
@@ -60,6 +67,10 @@ export const config: AppConfig = {
     person: envStr('SENDER_PERSON', ''),
     email: envStr('SENDER_EMAIL', ''),
     phone: envStr('SENDER_PHONE', ''),
+    kanaSei: envStr('SENDER_KANA_SEI', ''),
+    kanaMei: envStr('SENDER_KANA_MEI', ''),
+    postal: envStr('SENDER_POSTAL', ''),
+    department: envStr('SENDER_DEPARTMENT', '営業部'),
   },
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
   llmModel: envStr('LLM_MODEL', 'claude-sonnet-5'),

@@ -98,6 +98,25 @@
 
 ---
 
+## 6.5 改善実装ログ
+
+### 2026-07-09 — 課題A（分割フィールド）＋B（フリガナ）＋D（メール確認）を実装・検証
+
+分割フィールドを「サブロール」基盤としてまとめて解消。フォーム埋め精度の最大要因を除去した。
+
+- **新レイヤ [src/layers/l2_split.ts](../src/layers/l2_split.ts)**: 論理1項目が複数inputに分かれるケースを2系統で検出
+  - 属性規約: `tel1/tel2/tel3`・`sei/mei`・`lastname/firstname`・`zip1/zip2`・autocomplete(`tel-area-code`等)・メール確認欄(`確認/再入力/2`)
+  - 構造的隣接: 同一ラベル（例「電話番号」）配下の連続input群を位置で分割
+- **サブロール追加** ([types.ts](../src/types.ts)): `name_sei/name_mei`・`kana_sei/kana_mei`・`phone1/2/3`・`postal1/2`・`email_confirm`。`SPLIT_TO_BASE` で基底ロールへ畳み込み
+- **値生成** ([l3_content.ts](../src/layers/l3_content.ts)): 電話をハイフン分割、氏名を姓/名分割、フリガナは `SENDER_KANA_SEI/MEI` から、郵便を上3桁/下4桁分割、メール確認は同値。**真実の送信者情報のみ使用し、未設定値は捏造せず空**（→必須欠落はゲートで人手へ）
+- **投入** ([l4_submit.ts](../src/layers/l4_submit.ts)): サブロールを `TEXT_ROLES` に追加
+- **ゲート** ([gate.ts](../src/core/gate.ts)): 分割された `name` を「両半分が揃えば充足」として必須判定に反映
+- **設定** ([config.ts](../src/config.ts) / .env): `SENDER_KANA_SEI`・`SENDER_KANA_MEI`・`SENDER_POSTAL`・`SENDER_DEPARTMENT`
+
+**検証**: unit 12件 PASS（分割検出・非分割の誤検出なし・値分割）。E2E に分割フォーム `/split`（姓名・セイメイ・郵便2分割・電話3分割・メール確認）を追加し、**全14項目を個別入力→サーバ側で各パート必須＋メール一致を検証→送信成功**。従来 mid/low 相当のフォームが **gate=high** に到達。
+
+**残課題**: C（必須select/radio）・E（フォーム種別判定）・F（iframe/SPA発見）。次反復で C→E の順に着手予定。
+
 ## 6. 再現方法
 
 ```bash
