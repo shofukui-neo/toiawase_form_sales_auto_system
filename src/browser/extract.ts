@@ -43,6 +43,14 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
     }
 
     function isHoneypot(el: HTMLElement): boolean {
+      // Custom-styled consent checkboxes hide the real <input> (display:none /
+      // opacity:0 / zero-size) and show a styled proxy. These are legitimate
+      // required controls, not honeypots — recognise them by their consent-ish
+      // label/name/id and never treat them as traps.
+      if ((el.getAttribute('type') || '').toLowerCase() === 'checkbox') {
+        const meta = `${el.getAttribute('name') || ''} ${el.id || ''} ${labelFor(el) || ''}`;
+        if (/同意|個人情報|プライバシー|規約|承諾|agree|privacy|consent|policy/i.test(meta)) return false;
+      }
       const style = window.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return true;
       if (parseFloat(style.opacity || '1') === 0) return true;

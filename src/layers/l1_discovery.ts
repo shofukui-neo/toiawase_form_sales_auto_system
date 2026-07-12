@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import { XMLParser } from 'fast-xml-parser';
-import { baseUrl, resolveUrl, sameSite } from '../utils/url.js';
+import { baseUrl, normalizeDomain, resolveUrl, sameSite } from '../utils/url.js';
 import { BrowserSession } from '../browser/browser.js';
 import { extractFields } from '../browser/extract.js';
 import { logger } from '../utils/logger.js';
@@ -102,9 +102,23 @@ function scoreForm(url: string, s: FormSignals, method: DiscoveryMethod): number
   return Math.min(1, Number(score.toFixed(3)));
 }
 
+/**
+ * Resolve the working https base for a domain. Corporate sites frequently serve
+ * only on `www.` (the apex doesn't resolve or its TLS cert is www-only), so try
+ * `https://www.<d>` first, then the apex. Returns the first base whose homepage
+ * responds < 400; falls back to the apex when neither responds.
+ */
+async function resolveBase(domain: string): Promise<string> {
+  const norm = normalizeDomain(domain);
+  for (const base of [`https://www.${norm}`, `https://${norm}`]) {
+    const home = await fetchPage(base + '/');
+    if (home && home.status < 400) return base;
+  }
+  return baseUrl(domain);
+}
+
 /** Collect contact-ish candidate URLs (200 OK) from all static stages. */
-async function collectCandidates(domain: string): Promise<{ url: string; page: FetchedPage; method: DiscoveryMethod }[]> {
-  const base = baseUrl(domain);
+async function collectCandidates(domain: string, base: string): Promise<{ url: string; page: FetchedPage; method: DiscoveryMethod }[]> {
   const seen = new Set<string>();
   const out: { url: string; page: FetchedPage; method: DiscoveryMethod }[] = [];
 
@@ -202,7 +216,8 @@ export interface DiscoverOptions {
  * cannot see. Returns formUrl=null (FORM_NOT_FOUND) as an expected outcome.
  */
 export async function discoverForm(domain: string, opts: DiscoverOptions = {}): Promise<DiscoveryResult> {
-  const candidates = await collectCandidates(domain);
+  const base = await resolveBase(domain);
+  const candidates = await collectCandidates(domain, base);
 
   // Static confirmation, preferring cheaper methods and stronger signals.
   const order: DiscoveryMethod[] = ['common_path', 'link_scan', 'sitemap'];
@@ -227,7 +242,6 @@ export async function discoverForm(domain: string, opts: DiscoverOptions = {}): 
     // If static fetch was fully blocked (no candidates at all, e.g. bot-walled
     // sites), still try rendering the common contact paths with a real browser.
     if (targets.length === 0) {
-      const base = baseUrl(domain);
       targets = ['/contact/', '/contact', '/inquiry/', '/otoiawase/', '/'].map((p) => base + p);
     }
     const rendered = await browserConfirm(targets);

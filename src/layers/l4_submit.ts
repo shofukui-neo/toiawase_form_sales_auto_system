@@ -55,12 +55,30 @@ async function fillForm(
     }
   }
 
-  // Consent checkboxes (agree). Check every agree-mapped box.
+  // Consent checkboxes (agree). Many JP forms custom-style the checkbox and hide
+  // the real <input> (display:none), which even Playwright force-check refuses to
+  // toggle. So: try a normal/force check first, then fall back to setting checked
+  // + dispatching input/change events via the DOM (works regardless of
+  // visibility and still fires framework handlers that enable the submit button).
   for (const m of schema.mappings.filter((x) => x.role === 'agree')) {
+    const loc = page.locator(m.selector).first();
     try {
-      await page.locator(m.selector).first().check({ timeout: 5000 });
-    } catch (e) {
-      log.warn(`agree check failed ${m.selector}: ${(e as Error).message}`);
+      await loc.check({ force: true, timeout: 3000 });
+    } catch {
+      /* hidden custom checkbox — fall through to DOM toggle */
+    }
+    const checked = await loc.isChecked().catch(() => false);
+    if (!checked) {
+      try {
+        await loc.evaluate((el: HTMLInputElement) => {
+          el.checked = true;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('click', { bubbles: true }));
+        });
+      } catch (e) {
+        log.warn(`agree check failed ${m.selector}: ${(e as Error).message}`);
+      }
     }
   }
 }
