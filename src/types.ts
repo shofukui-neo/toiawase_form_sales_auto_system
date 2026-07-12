@@ -33,6 +33,9 @@ export type FieldRole =
   | 'department' // 部署/役職
   | 'subject' // 件名
   | 'message' // 本文
+  | 'email_confirm' // メールアドレス（確認用）
+  | 'postal' // 郵便番号
+  | 'address' // 住所/所在地
   | 'agree' // 同意 (checkbox)
   | 'unknown';
 

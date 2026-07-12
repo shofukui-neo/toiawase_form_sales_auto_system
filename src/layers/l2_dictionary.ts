@@ -22,10 +22,27 @@ export const ROLE_RULES: RoleRule[] = [
     weight: 0.9,
   },
   {
+    // Must out-score `email` so the greedy assigner claims the confirm field for
+    // email_confirm (both rules match "メールアドレス確認用"; higher weight wins).
+    role: 'email_confirm',
+    keywords: ['確認用', 'メール確認', '（確認', '確認）', '再入力', '再度', 'confirm', 'retype', 're-enter'],
+    weight: 0.95,
+  },
+  {
     role: 'email',
     keywords: ['メール', 'e-mail', 'email', 'mail', 'メールアドレス', 'アドレス'],
     types: ['email'],
     weight: 0.92,
+  },
+  {
+    role: 'postal',
+    keywords: ['郵便番号', '〒', 'zip', 'postal', 'ゆうびん', 'postcode'],
+    weight: 0.85,
+  },
+  {
+    role: 'address',
+    keywords: ['住所', 'ご住所', '所在地', 'address', '市区町村以降', '町名番地', '番地以降', '以降の住所'],
+    weight: 0.8,
   },
   {
     role: 'phone',

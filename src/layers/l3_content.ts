@@ -71,18 +71,20 @@ export function renderContent(
   const values: Partial<Record<FieldRole, string>> = {
     company: company.name,
     name: s.person || '採用担当者',
-    kana: '', // left blank unless a kana of a sender is configured; see note below
+    kana: s.kana, // configured sender kana (SENDER_KANA)
     email: s.email || 'contact@example.com',
+    email_confirm: s.email || 'contact@example.com',
     phone: fallbackPhone,
     department: fallbackDepartment,
     subject: fallbackSubject,
     message: fallbackBody,
+    postal: s.postal,
+    address: s.address,
     agree: 'on',
   };
 
-  // Provide something for kana if the form requires it, to avoid validation fails;
-  // uses a placeholder derived from the person field only if it is katakana already.
-  if (/^[ァ-ヶー\s]+$/.test(s.person)) values.kana = s.person;
+  // Fall back to the person field for kana only if it is already katakana.
+  if (!values.kana && /^[ァ-ヶー\s　]+$/.test(s.person)) values.kana = s.person;
 
   return { subject, body, values };
 }

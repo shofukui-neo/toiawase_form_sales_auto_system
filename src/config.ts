@@ -27,8 +27,11 @@ export interface SenderIdentity {
   company: string;
   product: string;
   person: string;
+  kana: string;
   email: string;
   phone: string;
+  postal: string;
+  address: string;
 }
 
 export interface AppConfig {
@@ -58,8 +61,11 @@ export const config: AppConfig = {
     company: envStr('SENDER_COMPANY', 'ネオキャリア株式会社'),
     product: envStr('SENDER_PRODUCT', 'MOCHICA'),
     person: envStr('SENDER_PERSON', ''),
+    kana: envStr('SENDER_KANA', ''),
     email: envStr('SENDER_EMAIL', ''),
     phone: envStr('SENDER_PHONE', ''),
+    postal: envStr('SENDER_POSTAL', ''),
+    address: envStr('SENDER_ADDRESS', ''),
   },
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
   llmModel: envStr('LLM_MODEL', 'claude-sonnet-5'),
