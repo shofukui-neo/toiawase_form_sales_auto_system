@@ -187,6 +187,7 @@ async function main() {
       hasCaptcha: 'none',
       hasHoneypot: true,
       noSalesPolicy: false,
+      ambiguousChoice: false,
       mappingConfidence: 0.62,
       gate: 'low',
     };

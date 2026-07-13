@@ -51,6 +51,11 @@ export const ROLE_RULES: RoleRule[] = [
     weight: 0.9,
   },
   {
+    role: 'postal',
+    keywords: ['郵便番号', '郵便', '〒', 'zip', 'postal', 'postcode', 'ゆうびん', 'zipcode'],
+    weight: 0.85,
+  },
+  {
     role: 'company',
     keywords: [
       '会社名',

@@ -39,6 +39,22 @@ export function computeGate(input: GateInput): GateResult {
     byRole.set(m.role, Math.max(byRole.get(m.role) ?? 0, m.confidence));
   }
 
+  // Fold split sub-roles into their base role so required-role checks see a
+  // satisfied name/phone/kana/postal when the form splits them (課題A). A split
+  // role only counts when BOTH halves are mapped.
+  const pair = (a: FieldRole, b: FieldRole): number | undefined => {
+    const ca = byRole.get(a);
+    const cb = byRole.get(b);
+    return ca !== undefined && cb !== undefined ? Math.min(ca, cb) : undefined;
+  };
+  const foldBase = (base: FieldRole, conf: number | undefined) => {
+    if (conf !== undefined && !byRole.has(base)) byRole.set(base, conf);
+  };
+  foldBase('name', pair('name_sei', 'name_mei'));
+  foldBase('kana', pair('kana_sei', 'kana_mei'));
+  foldBase('postal', pair('postal1', 'postal2'));
+  foldBase('phone', pair('phone1', 'phone2')); // 2- or 3-part share phone1/phone2
+
   const requiredConfs = REQUIRED_ROLES.map((r) => byRole.get(r) ?? 0);
   const missingRequired = REQUIRED_ROLES.filter((r) => (byRole.get(r) ?? 0) === 0);
   const minRequiredConf = Math.min(...requiredConfs);
@@ -68,6 +84,12 @@ export function computeGate(input: GateInput): GateResult {
 
   // ---- Tiered on confidence ----
   if (minRequiredConf >= 0.85 && formConfidence >= 0.8) {
+    // A required select/radio filled by an uncertain fallback (or a required
+    // radio left unchosen) must be seen by a human before any auto-send (課題C).
+    if (schema.ambiguousChoice) {
+      reasons.push('ambiguous-choice-needs-review');
+      return { gate: 'mid', mappingConfidence, reasons };
+    }
     reasons.push('all-required-high-confidence');
     return { gate: 'high', mappingConfidence, reasons };
   }
