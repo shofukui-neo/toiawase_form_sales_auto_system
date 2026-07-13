@@ -187,7 +187,9 @@ function pickChoiceIndex(labels: string[]): number {
       if (i >= 0) return i;
     }
   }
-  const recruit = labels.findIndex((o) => /採用|新卒|中途|人事|recruit|hr|人材/i.test(o) && !isPlaceholderOpt(o));
+  const recruit = labels.findIndex(
+    (o) => /採用|新卒|中途|人事|人材|リクルート|エントリー|recruit|hr/i.test(o) && !isPlaceholderOpt(o),
+  );
   if (recruit >= 0) return recruit;
   const other = labels.findIndex((o) => /その他|other|下記以外/i.test(o) && !isPlaceholderOpt(o));
   if (other >= 0) return other;

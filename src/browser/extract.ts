@@ -116,6 +116,36 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
       return null;
     }
 
+    // Many JP forms mark a field required with a visual 必須 badge instead of the
+    // HTML `required` attribute. Detect it in the field's immediate row/label
+    // (tight containers only, to avoid inheriting a neighbour's badge).
+    function hasRequiredBadge(el: HTMLElement): boolean {
+      const areas: Element[] = [];
+      const row = el.closest('tr, .form-row, .form-group, dd, li, fieldset');
+      if (row) {
+        areas.push(row);
+        // dl/dt/dd & table layouts keep the 必須 badge in the preceding label cell.
+        const prev = row.previousElementSibling;
+        if (prev && /^(th|dt)$/i.test(prev.tagName)) areas.push(prev);
+      }
+      if (el.id) {
+        const lab = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (lab) areas.push(lab);
+      }
+      // Class-based badges (often rendered via CSS ::before, so no 必須 text): the
+      // marker class can be on the label element itself or a child span.
+      const reqSel =
+        '.required, .req, .must, .hissu, .is-required, .form-required, [class*="requir"], [class*="hissu"]';
+      for (const a of areas) {
+        if (a.matches(reqSel) || a.querySelector(reqSel)) return true;
+        if (/必\s*須|＊\s*必須|※\s*必須|\brequired\b/i.test(a.textContent || '')) return true;
+        // An asterisk marker (label ending in * / ＊) — only trust it on a short
+        // label element (dt/th/label), never a long paragraph, to avoid noise.
+        if (/^(th|dt|label)$/i.test(a.tagName) && /[＊*]/.test((a.textContent || '').trim())) return true;
+      }
+      return false;
+    }
+
     const out: any[] = [];
     const nodes = Array.from(document.querySelectorAll('input, textarea, select')) as HTMLElement[];
     for (const el of nodes) {
@@ -135,7 +165,10 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
         id: el.id || null,
         labelText: labelFor(el),
         placeholder: el.getAttribute('placeholder'),
-        required: el.hasAttribute('required') || el.getAttribute('aria-required') === 'true',
+        required:
+          el.hasAttribute('required') ||
+          el.getAttribute('aria-required') === 'true' ||
+          hasRequiredBadge(el),
         honeypot: isHoneypot(el),
         options,
       });
