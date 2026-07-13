@@ -3,11 +3,12 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
-import { companies } from '../db/repositories.js';
-import { listPending, listApproved, approve, reject, suppressCompany } from '../pipeline/approval.js';
+import { companies, submissions, fieldMaps } from '../db/repositories.js';
+import { listApproved, approve, reject, suppressCompany } from '../pipeline/approval.js';
 import { runExecute } from '../pipeline/pipeline.js';
 import { canSendNow } from '../crosscutting/pacing.js';
-import type { CompanyStatus, SuppressionReason } from '../types.js';
+import { buildReview } from './review.js';
+import type { SuppressionReason } from '../types.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('web');
@@ -36,7 +37,25 @@ export function createServer() {
     res.json(counts);
   });
 
-  app.get('/api/pending', (_req, res) => res.json(listPending()));
+  // Field-by-field review for each pending plan: what value goes into each
+  // blank the form actually asks for, with mis-mapping / coverage flags.
+  app.get('/api/pending', (_req, res) => {
+    const items = companies.byStatus('PENDING_APPROVAL', 100).map((c) => {
+      const schema = fieldMaps.latest(c.id);
+      const sub = submissions.latestForCompany(c.id);
+      if (!schema) {
+        return {
+          companyId: c.id, name: c.name, domain: c.domain, formUrl: c.form_url,
+          gate: 'unknown', mappingConfidence: 0, hasConfirmScreen: false, hasCaptcha: 'none',
+          screenshot: sub?.plan_screenshot_url ?? null, subject: '', body: sub?.content_rendered ?? '',
+          submissionId: sub?.id ?? null, fields: [],
+          coverage: { requiredTotal: 0, requiredFilled: 0, missing: 0, suspect: 0, honeypots: 0 },
+        };
+      }
+      return buildReview(c, schema, sub);
+    });
+    res.json(items);
+  });
   app.get('/api/approved', (_req, res) => res.json(listApproved()));
 
   const approver = () => process.env.USER_EMAIL || 'dashboard';

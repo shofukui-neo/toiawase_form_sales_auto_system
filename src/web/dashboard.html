@@ -6,68 +6,107 @@
   <title>フォーム営業 承認ダッシュボード</title>
   <style>
     :root {
-      --bg: #f6f7f9; --card: #fff; --fg: #1c1f23; --muted: #6b7280;
-      --line: #e5e7eb; --accent: #2563eb; --ok: #16a34a; --warn: #d97706;
-      --danger: #dc2626; --block: #7c3aed;
+      --bg:#f4f5f7; --card:#fff; --fg:#1c1f23; --muted:#6b7280; --line:#e5e7eb;
+      --accent:#2563eb; --ok:#16a34a; --okbg:#16a34a14; --warn:#d97706; --warnbg:#d9770618;
+      --danger:#dc2626; --dangerbg:#dc262614; --auto:#7c3aed; --autobg:#7c3aed14; --block:#7c3aed;
+      --code:#0000000a;
     }
     @media (prefers-color-scheme: dark) {
-      :root { --bg:#0f1115; --card:#181b21; --fg:#e6e8eb; --muted:#9aa2ad;
-        --line:#262b33; --accent:#3b82f6; }
+      :root { --bg:#0d0f13; --card:#171a20; --fg:#e6e8eb; --muted:#9aa2ad; --line:#252b33;
+        --accent:#3b82f6; --okbg:#16a34a22; --warnbg:#d9770622; --dangerbg:#dc262622; --autobg:#7c3aed26;
+        --code:#ffffff0a; }
     }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
-      background: var(--bg); color: var(--fg); }
-    header { position: sticky; top: 0; background: var(--card); border-bottom: 1px solid var(--line);
-      padding: 12px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; z-index: 10; }
-    header h1 { font-size: 16px; margin: 0; font-weight: 700; }
-    .counts { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
-    .counts b { color: var(--fg); }
-    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
-    .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
-      margin: 24px 0 10px; }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
-      margin-bottom: 14px; display: grid; grid-template-columns: 320px 1fr; gap: 16px; }
-    @media (max-width: 720px) { .card { grid-template-columns: 1fr; } }
-    .shot { width: 100%; border: 1px solid var(--line); border-radius: 8px; max-height: 360px; object-fit: cover;
-      object-position: top; background: #0002; cursor: zoom-in; }
-    .meta h2 { font-size: 15px; margin: 0 0 4px; }
-    .meta .domain { color: var(--muted); font-size: 13px; margin-bottom: 8px; word-break: break-all; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
-      color: #fff; }
-    .g-high { background: var(--ok); } .g-mid { background: var(--warn); }
-    .g-low { background: var(--danger); } .g-block { background: var(--block); }
-    .kv { font-size: 12px; color: var(--muted); margin: 6px 0; }
-    .body { white-space: pre-wrap; font-size: 12px; background: #0000000a; border: 1px solid var(--line);
-      border-radius: 8px; padding: 10px; margin-top: 10px; max-height: 200px; overflow: auto; }
-    @media (prefers-color-scheme: dark) { .body { background: #ffffff08; } }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-    button { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
-      background: var(--card); color: var(--fg); cursor: pointer; }
-    button:hover { border-color: var(--accent); }
-    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    button.ok { background: var(--ok); color: #fff; border-color: var(--ok); }
-    button.danger { color: var(--danger); }
-    button:disabled { opacity: .5; cursor: default; }
-    .empty { color: var(--muted); padding: 30px; text-align: center; }
-    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #111827;
-      color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s;
-      pointer-events: none; }
-    .toast.show { opacity: 1; }
-    a.formlink { color: var(--accent); font-size: 12px; }
-    dialog { border: none; border-radius: 12px; padding: 0; max-width: 92vw; background: transparent; }
-    dialog img { max-width: 92vw; max-height: 88vh; border-radius: 12px; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,"Segoe UI","Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+      background:var(--bg); color:var(--fg); font-size:14px; }
+    header { position:sticky; top:0; z-index:20; background:var(--card); border-bottom:1px solid var(--line);
+      padding:10px 20px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+    header h1 { font-size:15px; margin:0; font-weight:700; }
+    .counts { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--muted); }
+    .counts b { color:var(--fg); }
+    .pace-ok { color:var(--ok); font-weight:700; } .pace-no { color:var(--danger); font-weight:700; }
+    .wrap { max-width:1280px; margin:0 auto; padding:18px; }
+    .section-title { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+      margin:20px 4px 10px; font-weight:700; }
+
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; margin-bottom:16px;
+      overflow:hidden; }
+    .card.flag-missing { border-color:#dc262655; }
+    .chead { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:14px 16px;
+      border-bottom:1px solid var(--line); }
+    .chead h2 { font-size:15px; margin:0; font-weight:700; }
+    .chead .domain { color:var(--muted); font-size:12px; }
+    .spacer { flex:1 1 auto; }
+    .badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:700; color:#fff; }
+    .g-high{background:var(--ok)} .g-mid{background:var(--warn)} .g-low{background:var(--danger)}
+    .g-block{background:var(--block)} .g-unknown{background:var(--muted)}
+    .chip { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:999px;
+      font-size:12px; font-weight:600; border:1px solid var(--line); background:var(--code); }
+    .chip.good{ color:var(--ok); border-color:var(--ok); }
+    .chip.bad{ color:var(--danger); border-color:var(--danger); background:var(--dangerbg); }
+    .chip.warn{ color:var(--warn); border-color:var(--warn); background:var(--warnbg); }
+    .chip.auto{ color:var(--auto); border-color:var(--auto); background:var(--autobg); }
+
+    .cbody { display:grid; grid-template-columns:1.15fr .85fr; gap:0; }
+    @media (max-width:940px){ .cbody{ grid-template-columns:1fr; } }
+    .col-fields { padding:14px 16px; border-right:1px solid var(--line); }
+    @media (max-width:940px){ .col-fields{ border-right:none; border-bottom:1px solid var(--line);} }
+    .col-shot { padding:14px 16px; }
+
+    table.fields { width:100%; border-collapse:collapse; }
+    table.fields th { text-align:left; font-size:11px; color:var(--muted); font-weight:600;
+      padding:0 8px 6px; border-bottom:1px solid var(--line); }
+    table.fields td { padding:7px 8px; vertical-align:top; border-bottom:1px solid var(--line); }
+    tr.st-ok td.icn{ color:var(--ok) } tr.st-suspect{ background:var(--warnbg) } tr.st-missing{ background:var(--dangerbg) }
+    tr.st-auto td.icn{ color:var(--auto) } tr.st-optional{ opacity:.55 } tr.st-honeypot{ opacity:.4 }
+    td.icn { width:20px; font-weight:700; }
+    .flabel { font-weight:600; }
+    .flabel .req { color:var(--danger); font-weight:700; margin-left:3px; }
+    .ftype { font-size:10px; color:var(--muted); font-family:ui-monospace,Menlo,Consolas,monospace; }
+    .fval { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; word-break:break-word; }
+    .fval.empty { color:var(--danger); font-weight:600; }
+    .fnote { font-size:11px; color:var(--warn); margin-top:2px; }
+    tr.st-missing .fnote{ color:var(--danger); }
+    .toggle { font-size:12px; color:var(--accent); cursor:pointer; margin-top:8px; display:inline-block; user-select:none; }
+
+    .shotframe { border:1px solid var(--line); border-radius:10px; overflow:auto; max-height:520px; background:#0002; }
+    .shotframe img { display:block; width:100%; height:auto; cursor:zoom-in; }
+    .noshot { padding:40px; text-align:center; color:var(--muted); }
+    .shothint { font-size:11px; color:var(--muted); margin:6px 2px 0; }
+    details.msg { margin-top:12px; }
+    details.msg summary { cursor:pointer; font-size:12px; color:var(--muted); font-weight:600; }
+    .msgbox { white-space:pre-wrap; font-size:12px; background:var(--code); border:1px solid var(--line);
+      border-radius:8px; padding:10px; margin-top:8px; max-height:260px; overflow:auto; }
+    .subj { font-size:12px; margin:8px 0 0; } .subj b{ color:var(--muted); font-weight:600; }
+
+    .actions { display:flex; gap:8px; flex-wrap:wrap; padding:12px 16px; border-top:1px solid var(--line);
+      background:var(--code); }
+    button { font:inherit; font-size:13px; padding:7px 14px; border-radius:8px; border:1px solid var(--line);
+      background:var(--card); color:var(--fg); cursor:pointer; }
+    button:hover { border-color:var(--accent); }
+    button.primary{ background:var(--accent); color:#fff; border-color:var(--accent); }
+    button.ok{ background:var(--ok); color:#fff; border-color:var(--ok); }
+    button.danger{ color:var(--danger); } button:disabled{ opacity:.5; cursor:default; }
+    a.formlink { color:var(--accent); font-size:12px; text-decoration:none; }
+    .empty { color:var(--muted); padding:34px; text-align:center; }
+    .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#111827; color:#fff;
+      padding:10px 18px; border-radius:8px; font-size:13px; opacity:0; transition:opacity .2s; pointer-events:none; z-index:50; }
+    .toast.show{ opacity:1; }
+    dialog { border:none; border-radius:12px; padding:0; max-width:96vw; max-height:96vh; background:transparent; }
+    dialog::backdrop{ background:#000a; } dialog img{ max-width:96vw; max-height:92vh; border-radius:10px; }
   </style>
 </head>
 <body>
   <header>
     <h1>📮 フォーム営業 承認ダッシュボード</h1>
     <div class="counts" id="counts"></div>
-    <button id="refresh" style="margin-left:auto">再読込</button>
+    <div class="spacer"></div>
+    <button id="refresh">再読込</button>
   </header>
   <div class="wrap">
-    <div class="section-title">承認待ち（PENDING_APPROVAL）</div>
+    <div class="section-title">承認待ち（各フォームの入力内容を項目単位で確認）</div>
     <div id="pending"></div>
-    <div class="section-title">承認済み・送信可（APPROVED）</div>
+    <div class="section-title">承認済み・送信可</div>
     <div id="approved"></div>
   </div>
   <div class="toast" id="toast"></div>
@@ -75,84 +114,121 @@
 
   <script>
     const $ = (s) => document.querySelector(s);
-    const toast = (msg) => { const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-      setTimeout(() => t.classList.remove('show'), 2200); };
-    const esc = (s) => (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    const toast = (m) => { const t=$('#toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2400); };
+    const esc = (s) => (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-    async function api(path, method = 'GET', body) {
-      const res = await fetch(path, { method,
-        headers: body ? { 'content-type': 'application/json' } : {},
-        body: body ? JSON.stringify(body) : undefined });
-      if (!res.ok) { const t = await res.text(); throw new Error(t || res.status); }
+    async function api(path, method='GET', body) {
+      const res = await fetch(path,{ method, headers: body?{'content-type':'application/json'}:{}, body: body?JSON.stringify(body):undefined });
+      if(!res.ok){ throw new Error((await res.text())||res.status); }
       return res.headers.get('content-type')?.includes('json') ? res.json() : res.text();
     }
 
-    function gateBadge(g) { return `<span class="badge g-${g}">gate: ${g}</span>`; }
+    const STATUS_ORDER = { missing:0, suspect:1, auto:2, ok:3, optional:4, honeypot:5 };
+    const ICON = { ok:'✓', suspect:'⚠', missing:'✕', auto:'⟳', optional:'·', honeypot:'🛈' };
 
-    function pendingCard(it) {
+    function coverageChips(cov){
+      const chips = [];
+      const filledClass = cov.missing>0 ? 'bad' : 'good';
+      chips.push(`<span class="chip ${filledClass}">必須 ${cov.requiredFilled}/${cov.requiredTotal} 充足</span>`);
+      if(cov.missing>0)  chips.push(`<span class="chip bad">未入力 ${cov.missing}</span>`);
+      if(cov.suspect>0)  chips.push(`<span class="chip warn">誤り疑い ${cov.suspect}</span>`);
+      const autos = 0; // auto count folded into required-filled; shown per-row
+      return chips.join(' ');
+    }
+
+    function fieldRow(f){
+      const emptyCls = (f.status==='missing') ? ' empty' : '';
+      const typ = esc((f.tag||'') + (f.type?('/'+f.type):''));
+      return `<tr class="st-${f.status}">
+        <td class="icn">${ICON[f.status]||''}</td>
+        <td><div class="flabel">${esc(f.label||'(ラベルなし)')}${f.required?'<span class="req">必須</span>':''}</div>
+            <div class="ftype">${typ}${f.role?(' · '+esc(f.role)):''}${f.confidence!=null?(' · '+Math.round(f.confidence*100)+'%'):''}</div></td>
+        <td><div class="fval${emptyCls}">${esc(f.value)}</div>${f.note?`<div class="fnote">${esc(f.note)}</div>`:''}</td>
+      </tr>`;
+    }
+
+    function pendingCard(it){
       const shot = it.screenshot ? `/artifacts/${it.screenshot.split(/[\\\/]/).pop()}` : '';
+      const rows = [...it.fields].sort((a,b)=>(STATUS_ORDER[a.status]-STATUS_ORDER[b.status]));
+      const primary = rows.filter(f => f.status!=='optional' && f.status!=='honeypot');
+      const extra   = rows.filter(f => f.status==='optional' || f.status==='honeypot');
+      const cardFlag = it.coverage.missing>0 ? ' flag-missing' : '';
+      const confirmTag = it.hasConfirmScreen ? '<span class="chip">確認画面あり</span>' : '<span class="chip">1段フォーム</span>';
+      const captchaTag = (it.hasCaptcha && it.hasCaptcha!=='none') ? `<span class="chip warn">CAPTCHA ${esc(it.hasCaptcha)}</span>` : '';
+
+      return `<div class="card${cardFlag}" data-id="${it.companyId}">
+        <div class="chead">
+          <h2>#${it.companyId} ${esc(it.name)}</h2>
+          <span class="badge g-${it.gate}">gate: ${esc(it.gate)}</span>
+          ${coverageChips(it.coverage)} ${confirmTag} ${captchaTag}
+          <div class="spacer"></div>
+          <a class="formlink" href="${esc(it.formUrl||'')}" target="_blank" rel="noopener">${esc(it.domain)} ↗</a>
+        </div>
+        <div class="cbody">
+          <div class="col-fields">
+            <table class="fields"><thead><tr><th></th><th>フォーム項目（実際のラベル）</th><th>入力される値</th></tr></thead>
+              <tbody>${primary.map(fieldRow).join('')||'<tr><td colspan="3" class="empty">解析済み項目なし</td></tr>'}</tbody>
+            </table>
+            ${extra.length?`<span class="toggle" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'table':'none';this.textContent=this.textContent.startsWith('▸')?'▾ 任意・罠 ${extra.length} 件を隠す':'▸ 任意・罠 ${extra.length} 件を表示'">▸ 任意・罠 ${extra.length} 件を表示</span>
+            <table class="fields" style="display:none;margin-top:6px"><tbody>${extra.map(fieldRow).join('')}</tbody></table>`:''}
+          </div>
+          <div class="col-shot">
+            ${shot?`<div class="shotframe"><img src="${shot}" onclick="zoom('${shot}')"></div>
+              <div class="shothint">実際のプレビュー全体（クリックで拡大）。確認画面 or 入力済みフォーム。</div>`
+              :'<div class="noshot">スクショなし</div>'}
+            <p class="subj"><b>件名：</b>${esc(it.subject||'(なし)')}</p>
+            <details class="msg"><summary>本文（textarea に入る全文）を表示</summary><div class="msgbox">${esc(it.body||'')}</div></details>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="ok" onclick="act(${it.companyId},'approve')">承認</button>
+          <button class="primary" onclick="act(${it.companyId},'approve-execute')">承認して即送信</button>
+          <button class="danger" onclick="act(${it.companyId},'reject')">却下</button>
+          <button onclick="suppress(${it.companyId})">抑制</button>
+        </div>
+      </div>`;
+    }
+
+    function approvedCard(it){
       return `<div class="card" data-id="${it.companyId}">
-        <div>${shot ? `<img class="shot" src="${shot}" onclick="zoom('${shot}')">`
-          : '<div class="empty">スクショなし</div>'}</div>
-        <div class="meta">
-          <h2>#${it.companyId} ${esc(it.name)} ${gateBadge(it.gate)}</h2>
-          <div class="domain">${esc(it.domain)}</div>
-          <div class="kv">マッピング信頼度: <b>${it.mappingConfidence}</b></div>
-          <div class="kv"><a class="formlink" href="${esc(it.formUrl||'')}" target="_blank" rel="noopener">${esc(it.formUrl||'(no form)')}</a></div>
-          <details><summary style="cursor:pointer;font-size:12px;color:var(--muted)">送信文面を表示</summary>
-            <div class="body">${esc(it.renderedBody)}</div></details>
-          <div class="actions">
-            <button class="ok" onclick="act(${it.companyId},'approve')">承認</button>
-            <button class="primary" onclick="act(${it.companyId},'approve-execute')">承認して即送信</button>
-            <button class="danger" onclick="act(${it.companyId},'reject')">却下</button>
-            <button onclick="suppress(${it.companyId})">抑制</button>
-          </div>
-        </div></div>`;
+        <div class="chead"><h2>#${it.companyId} ${esc(it.name)}</h2>
+          <span class="badge g-${it.gate}">gate: ${esc(it.gate)}</span>
+          <span class="domain">承認者: ${esc(it.approvedBy||'-')}</span><div class="spacer"></div></div>
+        <div class="actions"><button class="primary" onclick="act(${it.companyId},'execute')">送信実行</button></div>
+      </div>`;
     }
 
-    function approvedCard(it) {
-      return `<div class="card" data-id="${it.companyId}" style="grid-template-columns:1fr">
-        <div class="meta">
-          <h2>#${it.companyId} ${esc(it.name)} ${gateBadge(it.gate)}</h2>
-          <div class="domain">${esc(it.domain)} — 承認者: ${esc(it.approvedBy||'-')}</div>
-          <div class="actions">
-            <button class="primary" onclick="act(${it.companyId},'execute')">送信実行</button>
-          </div>
-        </div></div>`;
+    async function load(){
+      const [status, pending, approved] = await Promise.all([ api('/api/status'), api('/api/pending'), api('/api/approved') ]);
+      const pace = status['_送信可'];
+      const parts = Object.entries(status).filter(([k])=>k!=='_送信可').map(([k,v])=>`${k}: <b>${v}</b>`);
+      parts.push(pace ? '<span class="pace-ok">● 送信可能時間帯</span>' : '<span class="pace-no">● 送信時間外</span>');
+      $('#counts').innerHTML = parts.join(' · ');
+      $('#pending').innerHTML = pending.length ? pending.map(pendingCard).join('') : '<div class="empty">承認待ちはありません</div>';
+      $('#approved').innerHTML = approved.length ? approved.map(approvedCard).join('') : '<div class="empty">承認済みはありません</div>';
     }
 
-    async function load() {
-      const [status, pending, approved] = await Promise.all([
-        api('/api/status'), api('/api/pending'), api('/api/approved') ]);
-      $('#counts').innerHTML = Object.entries(status).map(([k,v]) => `${k}: <b>${v}</b>`).join(' · ');
-      $('#pending').innerHTML = pending.length ? pending.map(pendingCard).join('')
-        : '<div class="empty">承認待ちはありません</div>';
-      $('#approved').innerHTML = approved.length ? approved.map(approvedCard).join('')
-        : '<div class="empty">承認済みはありません</div>';
-    }
-
-    async function act(id, action) {
-      try {
-        if (action === 'approve') { await api(`/api/companies/${id}/approve`, 'POST'); toast(`#${id} を承認しました`); }
-        else if (action === 'reject') { await api(`/api/companies/${id}/reject`, 'POST'); toast(`#${id} を却下しました`); }
-        else if (action === 'execute') { toast(`#${id} 送信中…`); const r = await api(`/api/companies/${id}/execute`, 'POST'); toast(`#${id}: ${r.status} (${r.detail||''})`.slice(0,80)); }
-        else if (action === 'approve-execute') { await api(`/api/companies/${id}/approve`, 'POST'); toast(`#${id} 送信中…`); const r = await api(`/api/companies/${id}/execute`, 'POST'); toast(`#${id}: ${r.status}`); }
+    async function act(id, action){
+      try{
+        if(action==='approve'){ await api(`/api/companies/${id}/approve`,'POST'); toast(`#${id} を承認しました`); }
+        else if(action==='reject'){ if(!confirm(`#${id} を却下しますか？`))return; await api(`/api/companies/${id}/reject`,'POST'); toast(`#${id} を却下しました`); }
+        else if(action==='execute'){ toast(`#${id} 送信中…`); const r=await api(`/api/companies/${id}/execute`,'POST'); toast(`#${id}: ${r.status} ${r.detail||''}`.slice(0,90)); }
+        else if(action==='approve-execute'){ if(!confirm(`#${id} を承認して即送信しますか？`))return; await api(`/api/companies/${id}/approve`,'POST'); toast(`#${id} 送信中…`); const r=await api(`/api/companies/${id}/execute`,'POST'); toast(`#${id}: ${r.status}`); }
         await load();
-      } catch (e) { toast('エラー: ' + e.message.slice(0,80)); }
+      }catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
 
-    async function suppress(id) {
-      const reason = prompt('抑制理由を選択: opt_out / no_sales_policy / competitor / already_sent', 'opt_out');
-      if (!reason) return;
-      try { await api(`/api/companies/${id}/suppress`, 'POST', { reason }); toast(`#${id} を抑制しました`); await load(); }
-      catch (e) { toast('エラー: ' + e.message.slice(0,80)); }
+    async function suppress(id){
+      const reason = prompt('抑制理由: opt_out / no_sales_policy / competitor / already_sent','opt_out');
+      if(!reason) return;
+      try{ await api(`/api/companies/${id}/suppress`,'POST',{reason}); toast(`#${id} を抑制しました`); await load(); }
+      catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
 
-    function zoom(src) { $('#lbimg').src = src; $('#lightbox').showModal(); }
-    $('#lightbox').addEventListener('click', () => $('#lightbox').close());
-    $('#refresh').addEventListener('click', load);
-    load();
-    setInterval(load, 15000);
+    function zoom(src){ $('#lbimg').src=src; $('#lightbox').showModal(); }
+    $('#lightbox').addEventListener('click',()=>$('#lightbox').close());
+    $('#refresh').addEventListener('click',load);
+    load(); setInterval(load, 20000);
   </script>
 </body>
 </html>
