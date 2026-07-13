@@ -62,18 +62,20 @@ export function renderContent(
 
   // Values to type per role. We only supply what a legitimate sales inquiry needs;
   // roles the form has but we can't truthfully fill (e.g. kana of a real person)
-  // use the configured sender identity.
+  // use the configured sender identity. Values we don't truthfully have are left
+  // unset — never fabricated — so a required-but-missing field gates down to a
+  // human rather than sending a fake value.
   const [sei, mei] = splitName(s.person);
+  const email = s.email || 'contact@example.com';
   const fallbackPhone = s.phone || '03-0000-0000';
-  const fallbackDepartment = s.company ? '営業部' : '総務部';
+  const fallbackDepartment = s.department || (s.company ? '営業部' : '総務部');
   const fallbackSubject = subject || `お問い合わせ（${company.name}）`;
   const fallbackBody = body || `お世話になっております。${company.name}の採用ご担当者様へのお問い合わせです。`;
   const values: Partial<Record<FieldRole, string>> = {
     company: company.name,
     name: s.person || '採用担当者',
-    kana: s.kana, // configured sender kana (SENDER_KANA)
-    email: s.email || 'contact@example.com',
-    email_confirm: s.email || 'contact@example.com',
+    email,
+    email_confirm: email, // メール（確認）再入力欄 (課題D)
     phone: fallbackPhone,
     department: fallbackDepartment,
     subject: fallbackSubject,
@@ -83,8 +85,53 @@ export function renderContent(
     agree: 'on',
   };
 
-  // Fall back to the person field for kana only if it is already katakana.
-  if (!values.kana && /^[ァ-ヶー\s　]+$/.test(s.person)) values.kana = s.person;
+  // --- 氏名 split (課題A): 姓/名 to separate boxes ---
+  if (sei) values.name_sei = sei;
+  if (mei) values.name_mei = mei;
+
+  // --- フリガナ (課題B) ---
+  // Prefer explicitly-configured katakana (split, then legacy SENDER_KANA);
+  // else reuse the person field only if it is already katakana (never
+  // romaji->kana guesswork here).
+  if (s.kanaSei || s.kanaMei) {
+    if (s.kanaSei) values.kana_sei = s.kanaSei;
+    if (s.kanaMei) values.kana_mei = s.kanaMei;
+    values.kana = [s.kanaSei, s.kanaMei].filter(Boolean).join(' ');
+  } else if (s.kana) {
+    values.kana = s.kana; // configured full kana (SENDER_KANA)
+  } else if (/^[ァ-ヶー\s　]+$/.test(s.person)) {
+    values.kana = s.person;
+    const [ks, km] = splitName(s.person);
+    if (ks) values.kana_sei = ks;
+    if (km) values.kana_mei = km;
+  }
+
+  // --- 電話 split (課題A): 03-1234-5678 -> 3 (or 2) boxes ---
+  const phoneParts = fallbackPhone.split(/[-‐‑–—―ー－ｰ\s]+/).map((x) => x.trim()).filter(Boolean);
+  if (phoneParts.length >= 3) {
+    values.phone1 = phoneParts[0];
+    values.phone2 = phoneParts[1];
+    values.phone3 = phoneParts.slice(2).join('');
+  } else if (phoneParts.length === 2) {
+    values.phone1 = phoneParts[0];
+    values.phone2 = phoneParts[1];
+  }
+
+  // --- 郵便番号 split (課題A). Only when a truthful sender postal is configured. ---
+  if (s.postal) {
+    values.postal = s.postal;
+    const pp = s.postal.split(/[-‐‑–—―－\s]+/).map((x) => x.trim()).filter(Boolean);
+    if (pp.length >= 2) {
+      values.postal1 = pp[0];
+      values.postal2 = pp.slice(1).join('');
+    } else {
+      const digits = s.postal.replace(/[^0-9]/g, '');
+      if (digits.length === 7) {
+        values.postal1 = digits.slice(0, 3);
+        values.postal2 = digits.slice(3);
+      }
+    }
+  }
 
   return { subject, body, values };
 }

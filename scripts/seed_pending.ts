@@ -22,6 +22,7 @@ const schema: FormSchema = {
   hasCaptcha: 'none',
   hasHoneypot: true,
   noSalesPolicy: false,
+  ambiguousChoice: false,
   mappingConfidence: 0.78,
   gate: 'mid',
 };

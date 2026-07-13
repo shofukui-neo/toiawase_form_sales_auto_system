@@ -18,8 +18,13 @@ const log = logger('L4');
 
 /** Text roles we type into the form (agree/postal/phone get special handling). */
 const TEXT_ROLES: FieldRole[] = [
-  'company', 'name', 'kana', 'email', 'email_confirm',
-  'phone', 'department', 'subject', 'message', 'postal', 'address',
+  'company',
+  'name', 'name_sei', 'name_mei',
+  'kana', 'kana_sei', 'kana_mei',
+  'email', 'email_confirm',
+  'phone', 'phone1', 'phone2', 'phone3',
+  'postal', 'postal1', 'postal2',
+  'department', 'subject', 'message', 'address',
 ];
 
 /** Convert katakana to hiragana (フクイ -> ふくい); leaves 'ー', spaces, other chars. */
@@ -121,8 +126,31 @@ async function fillForm(
     }
   }
 
-  // Satisfy required, unmapped choice fields (category selects / radio groups)
-  // so validation passes; prefers a neutral 「その他」 option, else the first.
+  // Required select/radio auto-selection (課題C). Value was resolved at parse
+  // time (l2_choice) and carried on the mapping.
+  for (const m of schema.mappings.filter((x) => x.role === 'choice')) {
+    const field = schema.fields.find((f) => f.selector === m.selector);
+    try {
+      if (field?.tag === 'select') {
+        const loc = page.locator(m.selector).first();
+        await loc.selectOption({ label: m.value ?? '' }).catch(async () => {
+          // label may not match exactly (whitespace/decoration) — try first real option
+          const pick = (field.options ?? []).find((o) => o && !/選択|指定なし|please|--/.test(o));
+          if (pick) await loc.selectOption({ label: pick });
+        });
+      } else {
+        // radio (or radio-like): check the chosen control
+        await page.locator(m.selector).first().check({ timeout: 5000 });
+      }
+      await session.humanDelay(120, 400);
+    } catch (e) {
+      log.warn(`choice fill failed ${m.selector}: ${(e as Error).message}`);
+    }
+  }
+
+  // Safety net: satisfy any *required, unmapped* choice fields (category selects /
+  // radio groups) the parser did not resolve above, so validation still passes;
+  // prefers a neutral 「その他」 option, else the first. Skips already-mapped fields.
   await satisfyRequiredChoices(page, schema).catch((e) =>
     log.warn(`satisfyRequiredChoices failed: ${(e as Error).message}`),
   );

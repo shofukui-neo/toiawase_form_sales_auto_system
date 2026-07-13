@@ -1,6 +1,8 @@
 import type { Page } from 'playwright';
 import type { DetectedField, FieldMapping, FieldRole, FormSchema } from '../types.js';
 import { ROLE_RULES } from './l2_dictionary.js';
+import { detectSplitFields } from './l2_split.js';
+import { detectChoiceFields } from './l2_choice.js';
 import { classifyAmbiguousFields } from './l2_llm.js';
 import { computeGate } from '../core/gate.js';
 import { detectNoSalesPolicy } from '../crosscutting/compliance.js';
@@ -33,14 +35,19 @@ function haystack(f: DetectedField): string {
  * and the fields that stayed ambiguous (for the LLM fallback ③).
  * Honeypots are never mapped (④).
  */
-export function ruleMap(fields: DetectedField[]): {
+export function ruleMap(
+  fields: DetectedField[],
+  opts: { skip?: Set<number> } = {},
+): {
   mappings: FieldMapping[];
   ambiguousIdx: number[];
 } {
+  const skip = opts.skip ?? new Set<number>();
   const candidates: Candidate[] = [];
 
   fields.forEach((f, idx) => {
     if (f.honeypot) return; // ④: never touch honeypots
+    if (skip.has(idx)) return; // already claimed by the split-field detector (課題A)
     const hay = haystack(f);
     const fType = (f.type || '').toLowerCase();
     for (const rule of ROLE_RULES) {
@@ -90,6 +97,7 @@ export function ruleMap(fields: DetectedField[]): {
   const ambiguousIdx: number[] = [];
   fields.forEach((f, idx) => {
     if (f.honeypot) return;
+    if (skip.has(idx)) return;
     if (takenField.has(idx)) return;
     // ignore hidden types & submit-like already filtered upstream
     if ((f.type || '') === 'hidden') return;
@@ -130,7 +138,12 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       primaryFormSelector(page),
     ]);
 
-    const { mappings, ambiguousIdx } = ruleMap(fields);
+    // Split-field detection first (課題A/B/D): claim phone/name/kana/postal
+    // sub-fields and the email-confirm box so the generic mapper won't jam a
+    // whole value into the first box.
+    const split = detectSplitFields(fields);
+    const { mappings: ruleMappings, ambiguousIdx } = ruleMap(fields, { skip: split.consumed });
+    const mappings: FieldMapping[] = [...split.mappings, ...ruleMappings];
 
     // LLM fallback on ambiguous fields only, batched (③).
     const ambiguousFields = ambiguousIdx.map((i) => fields[i]);
@@ -161,6 +174,11 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       }
     }
 
+    // Required select/radio auto-selection (課題C), on fields nothing else claimed.
+    const mappedSelectors = new Set(mappings.map((m) => m.selector));
+    const choice = detectChoiceFields(fields, mappedSelectors);
+    mappings.push(...choice.mappings);
+
     const hasHoneypot = fields.some((f) => f.honeypot);
     const hasConfirmScreen = buttons.some((b) => b.kind === 'confirm');
     const noSalesHit = detectNoSalesPolicy(visibleText);
@@ -174,6 +192,7 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       hasCaptcha: captcha,
       hasHoneypot,
       noSalesPolicy: noSalesHit !== null,
+      ambiguousChoice: choice.ambiguous,
       mappingConfidence: 0,
       gate: 'low',
     };
