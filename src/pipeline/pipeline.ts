@@ -4,6 +4,8 @@ import { transition } from '../core/stateMachine.js';
 import { discoverForm } from '../layers/l1_discovery.js';
 import { parseForm } from '../layers/l2_parsing.js';
 import { renderContent } from '../layers/l3_content.js';
+import { computeCoverage } from '../layers/coverage.js';
+import { classifyEligibility } from '../crosscutting/eligibility.js';
 import { planSubmission, executeSubmission } from '../layers/l4_submit.js';
 import { preSendCheck, markSent } from '../crosscutting/compliance.js';
 import { canSendNow, recordSend } from '../crosscutting/pacing.js';
@@ -92,6 +94,18 @@ export async function buildPlan(companyId: number, opts: BuildPlanOptions = {}):
   const schema = fieldMaps.latest(company.id);
   if (!schema) {
     log.warn(`buildPlan: no schema for company=${companyId}`);
+    return;
+  }
+
+  // Eligibility gate (承認済みポリシー): non-B2B / CAPTCHA / un-fillable-required
+  // forms are auto-excluded so the approval queue only holds sendable plans.
+  const cov = computeCoverage(company, schema);
+  const elig = classifyEligibility(schema, cov);
+  if (!elig.eligible) {
+    suppression.add(company.domain, 'ineligible_form');
+    transition(company.id, 'SUPPRESSED', { force: true, detail: `ineligible:${elig.reason}${elig.detail ? `:${elig.detail}` : ''}` });
+    audit.log({ companyId: company.id, layer: 'L4', action: `exclude:${elig.reason}`, detail: elig.detail });
+    log.info(`excluded company=${companyId} reason=${elig.reason} ${elig.detail ?? ''}`);
     return;
   }
 

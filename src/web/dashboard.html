@@ -101,11 +101,14 @@
     <h1>📮 フォーム営業 承認ダッシュボード</h1>
     <div class="counts" id="counts"></div>
     <div class="spacer"></div>
+    <button id="sweep" title="消費者向け/CAPTCHA/入力不能な必須を持つフォームをキューから自動除外">非適格を自動除外</button>
     <button id="refresh">再読込</button>
   </header>
   <div class="wrap">
     <div class="section-title">承認待ち（各フォームの入力内容を項目単位で確認）</div>
     <div id="pending"></div>
+    <div class="section-title" id="excluded-title" style="display:none">自動除外（非B2B / CAPTCHA / 入力不能な必須）</div>
+    <div id="excluded"></div>
     <div class="section-title">承認済み・送信可</div>
     <div id="approved"></div>
   </div>
@@ -198,13 +201,26 @@
       </div>`;
     }
 
+    const EXCL_REASON = { captcha:'CAPTCHA必須', no_sales_policy:'営業お断り', consumer_form:'消費者向け/非B2B', unfillable_required:'入力不能な必須あり', not_contactable:'本文/会社名の入力先なし' };
+    function excludedCard(it){
+      return `<div class="card" data-id="${it.companyId}">
+        <div class="chead"><h2>#${it.companyId} ${esc(it.name)}</h2>
+          <span class="chip bad">除外: ${esc(EXCL_REASON[it.reason]||it.reason)}</span>
+          ${it.detail?`<span class="chip">${esc(it.detail)}</span>`:''}
+          <span class="domain">${esc(it.domain)}</span><div class="spacer"></div>
+          <button onclick="act(${it.companyId},'requeue')">キューに戻す</button>
+        </div></div>`;
+    }
+
     async function load(){
-      const [status, pending, approved] = await Promise.all([ api('/api/status'), api('/api/pending'), api('/api/approved') ]);
+      const [status, pending, approved, excluded] = await Promise.all([ api('/api/status'), api('/api/pending'), api('/api/approved'), api('/api/excluded') ]);
       const pace = status['_送信可'];
       const parts = Object.entries(status).filter(([k])=>k!=='_送信可').map(([k,v])=>`${k}: <b>${v}</b>`);
       parts.push(pace ? '<span class="pace-ok">● 送信可能時間帯</span>' : '<span class="pace-no">● 送信時間外</span>');
       $('#counts').innerHTML = parts.join(' · ');
       $('#pending').innerHTML = pending.length ? pending.map(pendingCard).join('') : '<div class="empty">承認待ちはありません</div>';
+      $('#excluded-title').style.display = excluded.length ? 'block' : 'none';
+      $('#excluded').innerHTML = excluded.map(excludedCard).join('');
       $('#approved').innerHTML = approved.length ? approved.map(approvedCard).join('') : '<div class="empty">承認済みはありません</div>';
     }
 
@@ -214,6 +230,7 @@
         else if(action==='reject'){ if(!confirm(`#${id} を却下しますか？`))return; await api(`/api/companies/${id}/reject`,'POST'); toast(`#${id} を却下しました`); }
         else if(action==='execute'){ toast(`#${id} 送信中…`); const r=await api(`/api/companies/${id}/execute`,'POST'); toast(`#${id}: ${r.status} ${r.detail||''}`.slice(0,90)); }
         else if(action==='approve-execute'){ if(!confirm(`#${id} を承認して即送信しますか？`))return; await api(`/api/companies/${id}/approve`,'POST'); toast(`#${id} 送信中…`); const r=await api(`/api/companies/${id}/execute`,'POST'); toast(`#${id}: ${r.status}`); }
+        else if(action==='requeue'){ await api(`/api/companies/${id}/requeue`,'POST'); toast(`#${id} をキューに戻しました`); }
         await load();
       }catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
@@ -228,6 +245,10 @@
     function zoom(src){ $('#lbimg').src=src; $('#lightbox').showModal(); }
     $('#lightbox').addEventListener('click',()=>$('#lightbox').close());
     $('#refresh').addEventListener('click',load);
+    $('#sweep').addEventListener('click', async()=>{
+      try{ const r=await api('/api/sweep','POST'); toast(`非適格 ${r.excluded} 件を除外しました`); await load(); }
+      catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
+    });
     load(); setInterval(load, 20000);
   </script>
 </body>

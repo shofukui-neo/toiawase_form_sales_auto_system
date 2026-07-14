@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { BrowserSession } from '../browser/browser.js';
 import { extractButtons } from '../browser/extract.js';
 import { judgeResult, type Judgment } from './l5_result.js';
+import { shouldFillField } from './fillPolicy.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L4');
@@ -105,6 +106,8 @@ async function fillForm(
       log.warn(`skipping honeypot-flagged selector for role ${role}`);
       continue;
     }
+    // Fill policy: required + core identity only; skip optional付帯欄 (§承認済み).
+    if (!shouldFillField(field, role)) continue;
     // Reading fields labelled 「ふりがな」expect hiragana, not katakana.
     if (role === 'kana' && kanaWantsHiragana(field)) value = toHiragana(value);
     try {

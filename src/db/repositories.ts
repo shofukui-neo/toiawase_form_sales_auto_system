@@ -162,6 +162,10 @@ export const suppression = {
       | undefined;
   },
 
+  remove(domain: string): void {
+    db().prepare('DELETE FROM suppression WHERE domain = ?').run(domain.toLowerCase());
+  },
+
   all(): { domain: string; reason: string; created_at: string }[] {
     return db().prepare('SELECT * FROM suppression ORDER BY created_at DESC').all() as any[];
   },

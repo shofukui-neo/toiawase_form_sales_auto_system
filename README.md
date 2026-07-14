@@ -95,6 +95,26 @@ npm run serve                 # http://localhost:4599
 ([approval.ts](src/pipeline/approval.ts))をそのままHTTP化したもの（§13-2）。
 実装: [src/web/server.ts](src/web/server.ts) + [src/web/dashboard.html](src/web/dashboard.html) + [src/web/review.ts](src/web/review.ts)。
 
+#### マッピング判断の基準（誤り疑い・未入力をゼロに近づける）
+
+項目照合と自動除外は次の基準で判定する。ロジックは
+[src/layers/coverage.ts](src/layers/coverage.ts)（項目単位の予測）/
+[src/layers/fillPolicy.ts](src/layers/fillPolicy.ts)（入力方針）/
+[src/crosscutting/eligibility.ts](src/crosscutting/eligibility.ts)（フォーム適格性）に集約。
+
+1. **ロール整合の判定**は `labelText` だけでなく `name / id / autocomplete` と `input type`
+   を横断照合（`type=email/tel` は最優先、`search_by_zip_code…` は郵便として認識）。分割欄は
+   base ロール（phone/postal/name/kana）に畳んで照合。→ 補助欄・分割欄の誤検知を排除。
+2. **入力方針＝必須＋主要身元のみ**（会社名/氏名/フリガナ/メール/電話/本文/同意）。任意の付帯欄
+   （部署・郵便番号検索の補助欄・積地/降地 等）は埋めない。L4 実入力と承認プレビューは
+   `shouldFillField()` を共有し、プレビューと実送信が乖離しない。
+3. **必須の select/radio**（種別・きっかけ等）は中立安全オプションを自動選択（`法人>企業>その他…`）。
+4. **非適格フォームは自動除外**（キューから外す・[eligibility.ts](src/crosscutting/eligibility.ts)）:
+   CAPTCHA必須 / 営業お断り / 消費者向け・非B2B（介護相談・施設見学・要介護度 等の語を検出） /
+   真実の値を持てない必須が残る / 本文も会社名も入力先が無い。**捏造せず除外**（コンプラ§9）。
+   ダッシュボードの「非適格を自動除外」ボタン（`POST /api/sweep`）または `buildPlan` 時に適用され、
+   除外理由は「自動除外」セクションに表示（「キューに戻す」で個別復帰可）。
+
 ### B — 実ドメインでのL1発見バッチ
 
 ```bash
