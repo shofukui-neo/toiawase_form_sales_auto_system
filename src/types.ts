@@ -77,7 +77,8 @@ export type SuppressionReason =
   | 'already_sent'
   | 'opt_out'
   | 'no_sales_policy'
-  | 'competitor';
+  | 'competitor'
+  | 'ineligible_form'; // consumer/non-B2B/CAPTCHA/un-fillable — auto-excluded from queue
 
 /** A single form control detected on the page. */
 export interface DetectedField {

@@ -3,10 +3,14 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
-import { companies } from '../db/repositories.js';
-import { listPending, listApproved, approve, reject, suppressCompany } from '../pipeline/approval.js';
+import { companies, submissions, fieldMaps, suppression } from '../db/repositories.js';
+import { listApproved, approve, reject, suppressCompany, excludeIneligiblePending } from '../pipeline/approval.js';
 import { runExecute } from '../pipeline/pipeline.js';
 import { canSendNow, nextSendDelayMs } from '../crosscutting/pacing.js';
+import { computeCoverage } from '../layers/coverage.js';
+import { classifyEligibility } from '../crosscutting/eligibility.js';
+import { transition } from '../core/stateMachine.js';
+import { buildReview } from './review.js';
 import type { CompanyRow, SuppressionReason } from '../types.js';
 import { logger } from '../utils/logger.js';
 
@@ -124,8 +128,48 @@ export function createServer() {
     res.json(counts);
   });
 
-  app.get('/api/pending', (_req, res) => res.json(listPending()));
+  // Field-by-field review for each pending plan: what value goes into each
+  // blank the form actually asks for, with mis-mapping / coverage flags.
+  app.get('/api/pending', (_req, res) => {
+    const items = companies.byStatus('PENDING_APPROVAL', 100).map((c) => {
+      const schema = fieldMaps.latest(c.id);
+      const sub = submissions.latestForCompany(c.id);
+      if (!schema) {
+        return {
+          companyId: c.id, name: c.name, domain: c.domain, formUrl: c.form_url,
+          gate: 'unknown', mappingConfidence: 0, hasConfirmScreen: false, hasCaptcha: 'none',
+          screenshot: sub?.plan_screenshot_url ?? null, subject: '', body: sub?.content_rendered ?? '',
+          submissionId: sub?.id ?? null, fields: [],
+          coverage: { requiredTotal: 0, requiredFilled: 0, missing: 0, suspect: 0, honeypots: 0 },
+        };
+      }
+      return buildReview(c, schema, sub);
+    });
+    res.json(items);
+  });
   app.get('/api/approved', (_req, res) => res.json(listApproved()));
+
+  // Auto-excluded (non-B2B / CAPTCHA / un-fillable) forms, with the reason.
+  app.get('/api/excluded', (_req, res) => {
+    const items = suppression
+      .all()
+      .filter((s) => s.reason === 'ineligible_form')
+      .map((s) => {
+        const c = companies.byDomain(s.domain);
+        if (!c) return null;
+        const schema = fieldMaps.latest(c.id);
+        const elig = schema ? classifyEligibility(schema, computeCoverage(c, schema)) : undefined;
+        return { companyId: c.id, name: c.name, domain: c.domain, reason: elig?.reason ?? 'ineligible', detail: elig?.detail ?? '' };
+      })
+      .filter(Boolean);
+    res.json(items);
+  });
+
+  // Run the eligibility sweep on demand (mirror of the pipeline gate).
+  app.post('/api/sweep', (_req, res) => {
+    const excluded = excludeIneligiblePending();
+    res.json({ excluded: excluded.length, items: excluded });
+  });
 
   const approver = () => process.env.USER_EMAIL || 'dashboard';
 
@@ -151,6 +195,20 @@ export function createServer() {
     try {
       const reason = (req.body?.reason ?? 'opt_out') as SuppressionReason;
       suppressCompany(Number(req.params.id), reason, approver());
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).send((e as Error).message);
+    }
+  });
+
+  // Put an auto-excluded company back into the approval queue (override).
+  app.post('/api/companies/:id/requeue', (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const c = companies.byId(id);
+      if (!c) throw new Error(`company ${id} not found`);
+      suppression.remove(c.domain);
+      transition(id, 'PENDING_APPROVAL', { force: true, actor: approver(), detail: 'manual requeue' });
       res.json({ ok: true });
     } catch (e) {
       res.status(400).send((e as Error).message);

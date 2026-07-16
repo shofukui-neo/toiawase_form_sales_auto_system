@@ -1,5 +1,7 @@
-import { companies, submissions, suppression, fieldMaps } from '../db/repositories.js';
+import { companies, submissions, suppression, fieldMaps, audit } from '../db/repositories.js';
 import { transition } from '../core/stateMachine.js';
+import { computeCoverage } from '../layers/coverage.js';
+import { classifyEligibility, type IneligibleReason } from '../crosscutting/eligibility.js';
 import type { SuppressionReason } from '../types.js';
 
 /**
@@ -59,6 +61,36 @@ export function listApproved(limit = 100): ApprovedItem[] {
       approvedBy: sub?.approved_by ?? null,
     };
   });
+}
+
+export interface ExcludedItem {
+  companyId: number;
+  name: string;
+  domain: string;
+  reason: IneligibleReason;
+  detail?: string;
+}
+
+/**
+ * Sweep the current approval queue and auto-exclude any form that is not a
+ * sendable B2B target (CAPTCHA / no-sales policy / consumer form / un-fillable
+ * required). Mirrors the pipeline's buildPlan gate, applied to plans that were
+ * queued before the eligibility policy existed. Returns what was excluded.
+ */
+export function excludeIneligiblePending(limit = 1000): ExcludedItem[] {
+  const excluded: ExcludedItem[] = [];
+  for (const c of companies.byStatus('PENDING_APPROVAL', limit)) {
+    const schema = fieldMaps.latest(c.id);
+    if (!schema) continue;
+    const cov = computeCoverage(c, schema);
+    const elig = classifyEligibility(schema, cov);
+    if (elig.eligible) continue;
+    suppression.add(c.domain, 'ineligible_form');
+    transition(c.id, 'SUPPRESSED', { force: true, detail: `ineligible:${elig.reason}${elig.detail ? `:${elig.detail}` : ''}` });
+    audit.log({ companyId: c.id, layer: 'approval', action: `exclude:${elig.reason}`, detail: elig.detail });
+    excluded.push({ companyId: c.id, name: c.name, domain: c.domain, reason: elig.reason!, detail: elig.detail });
+  }
+  return excluded;
 }
 
 export function approve(companyId: number, approver: string): void {

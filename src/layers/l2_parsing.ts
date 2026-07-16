@@ -49,10 +49,17 @@ export function ruleMap(
     if (f.honeypot) return; // ④: never touch honeypots
     if (skip.has(idx)) return; // already claimed by the split-field detector (課題A)
     const hay = haystack(f);
+    const fType = (f.type || '').toLowerCase();
     for (const rule of ROLE_RULES) {
       const kwHit = rule.keywords.some((k) => hay.includes(k.toLowerCase()));
-      const typeHit = rule.types?.includes((f.type || '').toLowerCase()) ?? false;
+      const typeHit = rule.types?.includes(fType) ?? false;
       if (!kwHit && !typeHit) continue;
+      // Text roles must never bind to a checkbox/radio (a 送信確認 checkbox's
+      // label contains 確認 and would otherwise steal the email_confirm role).
+      if (rule.role !== 'agree' && (fType === 'checkbox' || fType === 'radio')) continue;
+      // postal/address are free-text; never let them claim a <select> (e.g. the
+      // 都道府県 dropdown), which the required-choice pass fills by prefecture match.
+      if ((rule.role === 'postal' || rule.role === 'address') && f.tag === 'select') continue;
       let conf = 0;
       if (kwHit) conf = rule.weight;
       if (typeHit) conf = Math.max(conf, rule.weight - 0.05) + (kwHit ? 0.06 : 0);
@@ -146,6 +153,25 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       if (m.role !== 'agree' && usedRoles.has(m.role)) continue;
       usedRoles.add(m.role);
       mappings.push({ role: m.role, selector: m.selector, confidence: m.confidence, source: 'llm' });
+    }
+
+    // Positional email_confirm: forms often place the "re-enter your email"
+    // instruction in separate help text (not the field's own label), so keyword
+    // matching misses it. If email is mapped and a second email-ish field is
+    // still unmapped, treat it as the confirmation field.
+    if (!mappings.some((m) => m.role === 'email_confirm')) {
+      const emailSel = mappings.find((m) => m.role === 'email')?.selector;
+      const taken = new Set(mappings.map((m) => m.selector));
+      const confirm = fields.find(
+        (f) =>
+          !f.honeypot &&
+          f.selector !== emailSel &&
+          !taken.has(f.selector) &&
+          ((f.type || '') === 'email' || /mail|メール/i.test(`${f.name || ''} ${f.id || ''} ${f.labelText || ''}`)),
+      );
+      if (emailSel && confirm) {
+        mappings.push({ role: 'email_confirm', selector: confirm.selector, confidence: 0.7, source: 'structure' });
+      }
     }
 
     // Required select/radio auto-selection (課題C), on fields nothing else claimed.

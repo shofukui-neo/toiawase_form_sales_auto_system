@@ -88,6 +88,9 @@ export class BrowserSession {
     const el = page.locator(selector).first();
     await el.scrollIntoViewIfNeeded().catch(() => {});
     await el.click({ timeout: 8000 }).catch(() => {});
+    // Clear any existing/auto-populated value (e.g. a 住所 pre-filled by the
+    // form's 郵便番号→住所 lookup) so we replace rather than append to it.
+    await el.fill('').catch(() => {});
     await this.humanDelay(80, 250);
     for (const ch of text) {
       await el.type(ch, { delay: 15 + Math.floor(this.rng() * 60) });
