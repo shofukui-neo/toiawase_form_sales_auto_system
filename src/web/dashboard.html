@@ -109,7 +109,11 @@
     <div id="pending"></div>
     <div class="section-title" id="excluded-title" style="display:none">自動除外（非B2B / CAPTCHA / 入力不能な必須）</div>
     <div id="excluded"></div>
-    <div class="section-title">承認済み・送信可</div>
+    <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span>承認済み・送信可（APPROVED）</span>
+      <button id="sendAll" class="primary" style="margin-left:auto">🚀 一斉送信</button>
+      <span id="bulkProgress" style="font-size:12px;color:var(--muted);text-transform:none;letter-spacing:0"></span>
+    </div>
     <div id="approved"></div>
   </div>
   <div class="toast" id="toast"></div>
@@ -242,14 +246,69 @@
       catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
 
-    function zoom(src){ $('#lbimg').src=src; $('#lightbox').showModal(); }
-    $('#lightbox').addEventListener('click',()=>$('#lightbox').close());
-    $('#refresh').addEventListener('click',load);
+    // ---- 一斉送信（bulk send of all APPROVED companies）----
+    let bulkTimer = null;
+
+    async function sendAll() {
+      let approved = [];
+      try { approved = await api('/api/approved'); } catch (e) { toast('エラー: ' + e.message.slice(0,80)); return; }
+      if (!approved.length) { toast('承認済みの送信対象がありません'); return; }
+      if (!confirm(`承認済み ${approved.length} 社の問い合わせフォームに一斉送信します。\n送信間隔・日次上限・送信可能時間帯のルールは維持されます。\nよろしいですか？`)) return;
+      const btn = $('#sendAll');
+      btn.disabled = true;
+      try {
+        const r = await api('/api/execute-all', 'POST');
+        if (!r.started) { toast(r.message || '送信対象がありません'); btn.disabled = false; return; }
+        toast(`一斉送信を開始しました（${r.started} 社）`);
+        pollBulk();
+      } catch (e) { toast('エラー: ' + e.message.slice(0,80)); btn.disabled = false; }
+    }
+
+    function renderBulk(s) {
+      const prog = $('#bulkProgress');
+      const btn = $('#sendAll');
+      if (s && s.running) {
+        btn.disabled = true;
+        prog.textContent = `送信中… ${s.done}/${s.total}（成功 ${s.success} / 失敗 ${s.failed} / スキップ ${s.skipped}）`
+          + (s.current ? ` – ${s.current}` : '');
+        return true;
+      }
+      btn.disabled = false;
+      if (s && s.total) {
+        prog.textContent = `完了: 成功 ${s.success} / 失敗 ${s.failed} / スキップ ${s.skipped}`;
+      }
+      return false;
+    }
+
+    async function pollBulk() {
+      if (bulkTimer) { clearInterval(bulkTimer); bulkTimer = null; }
+      const tick = async () => {
+        let s;
+        try { s = await api('/api/execute-all/status'); } catch { return false; }
+        const running = renderBulk(s);
+        await load();
+        if (!running) {
+          if (bulkTimer) { clearInterval(bulkTimer); bulkTimer = null; }
+          if (s && s.total) toast(`一斉送信 完了（成功 ${s.success} / 失敗 ${s.failed} / スキップ ${s.skipped}）`);
+        }
+        return running;
+      };
+      const running = await tick();
+      if (running) bulkTimer = setInterval(tick, 3000);
+    }
+
+    function zoom(src) { $('#lbimg').src = src; $('#lightbox').showModal(); }
+    $('#lightbox').addEventListener('click', () => $('#lightbox').close());
+    $('#refresh').addEventListener('click', load);
+    $('#sendAll').addEventListener('click', sendAll);
     $('#sweep').addEventListener('click', async()=>{
       try{ const r=await api('/api/sweep','POST'); toast(`非適格 ${r.excluded} 件を除外しました`); await load(); }
       catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     });
-    load(); setInterval(load, 20000);
+    load();
+    // Resume the progress view if a bulk send is already running (e.g. page reload mid-run).
+    api('/api/execute-all/status').then((s) => { if (s && s.running) pollBulk(); }).catch(() => {});
+    setInterval(load, 15000);
   </script>
 </body>
 </html>
