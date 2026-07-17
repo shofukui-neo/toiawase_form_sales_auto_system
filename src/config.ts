@@ -94,9 +94,14 @@ export const config: AppConfig = {
 
 export interface IcpConfig {
   employees: { min: number; max: number };
+  /** Bonus band inside [min,max] where conversion peaks (ICP v2: 300–500名). */
+  employeesSweet?: { min: number; max: number };
   targetIndustries: string[];
   signals: string[];
+  /** Hard excludes: presence -> score 0 -> SUPPRESSED (competitor / policy). */
   excludeKeywords: string[];
+  /** Soft excludes (ICP v2 減点): low-conversion labels — penalized, not dropped. */
+  penalizeKeywords?: string[];
   competitorAts: string[];
 }
 

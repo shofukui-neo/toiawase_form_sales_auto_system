@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import { readFileSync, writeFileSync } from 'node:fs';
 import { Command } from 'commander';
 import { companies } from './db/repositories.js';
-import { ingestCsv } from './layers/l0_list.js';
+import { ingestCsv, ingestCsvWithResolve, parseCompaniesCsv } from './layers/l0_list.js';
+import { resolveHomepage } from './layers/l0_homepage.js';
 import { discoverAndParse, buildPlan, runExecute } from './pipeline/pipeline.js';
 import { listPending, approve, reject, suppressCompany } from './pipeline/approval.js';
 import { exportReport, exportSuppression } from './layers/l6_record.js';
@@ -20,11 +22,70 @@ program
 
 program
   .command('ingest')
-  .argument('<csv>', 'CSV file of [name, domain, industry?, employees?, source?]')
-  .description('L0 — ingest an ICP list and score it')
-  .action((csv: string) => {
-    const r = ingestCsv(csv);
-    console.log(`Ingested=${r.ingested} suppressed=${r.suppressed} skipped=${r.skipped}`);
+  .argument('<csv>', 'CSV of [name, domain?, industry?, employees?, prefecture?, source?]')
+  .option('--resolve', 'auto-discover the HP for rows missing a domain (web search)', false)
+  .option('--accept-unverified', 'with --resolve, also ingest domains we could not verify', false)
+  .description('L0 — ingest an ICP list and score it (--resolve to auto-find missing HPs)')
+  .action(async (csv: string, o: { resolve: boolean; acceptUnverified: boolean }) => {
+    if (o.resolve) {
+      const r = await ingestCsvWithResolve(csv, {
+        acceptUnverified: o.acceptUnverified,
+        onProgress: (m) => log.info(m),
+      });
+      console.log(
+        `Ingested=${r.ingested} suppressed=${r.suppressed} skipped=${r.skipped} ` +
+          `(hadDomain=${r.hadDomain} resolved=${r.resolved} unresolved=${r.unresolved.length})`,
+      );
+      for (const u of r.unresolved) {
+        console.log(`  ! unresolved: ${u.name} — ${u.reason}${u.candidate ? ` (candidate: ${u.candidate})` : ''}`);
+      }
+    } else {
+      const r = ingestCsv(csv);
+      console.log(`Ingested=${r.ingested} suppressed=${r.suppressed} skipped=${r.skipped}`);
+    }
+  });
+
+program
+  .command('resolve')
+  .argument('<file>', 'CSV/TXT of company names (one per line, or name,industry,prefecture)')
+  .option('-o, --out <path>', 'write the resolved [name,domain,...] CSV here')
+  .option('--accept-unverified', 'keep unverified candidates in the output', false)
+  .option('--ingest', 'also ingest the resolved rows into the pipeline', false)
+  .description('L0 拡張 — resolve official HPs for a name list (企業HPを自動探索)')
+  .action(async (file: string, o: { out?: string; acceptUnverified: boolean; ingest: boolean }) => {
+    const rows = parseCompaniesCsv(readFileSync(file, 'utf8'));
+    log.info(`resolving HP for ${rows.length} companies…`);
+    const out: string[] = ['name,domain,industry,prefecture,source,confidence,method'];
+    let ok = 0;
+    for (const row of rows) {
+      if (row.domain) {
+        out.push([row.name, row.domain, row.industry ?? '', row.prefecture ?? '', row.source ?? 'given', '1', 'given'].map(csvCell).join(','));
+        ok++;
+        continue;
+      }
+      const hp = await resolveHomepage(row.name, { industry: row.industry, prefecture: row.prefecture }).catch(() => null);
+      const verified = hp && (hp.method === 'search+verified' || o.acceptUnverified);
+      if (hp) {
+        console.log(`  ${verified ? '✓' : '?'} ${row.name} -> ${hp.domain} (${hp.method}, conf=${hp.confidence})`);
+      } else {
+        console.log(`  ✗ ${row.name} -> (not found)`);
+      }
+      if (verified && hp) {
+        out.push([row.name, hp.domain, row.industry ?? '', row.prefecture ?? '', 'hp_auto', String(hp.confidence), hp.method].map(csvCell).join(','));
+        ok++;
+      }
+    }
+    const csvText = out.join('\n') + '\n';
+    if (o.out) {
+      writeFileSync(o.out, csvText, 'utf8');
+      console.log(`\nWrote ${ok}/${rows.length} resolved rows -> ${o.out}`);
+    } else {
+      console.log('\n' + csvText);
+    }
+    if (o.ingest && o.out) {
+      const r = ingestCsv(o.out);
+      console.log(`Ingested=${r.ingested} suppressed=${r.suppressed} skipped=${r.skipped}`);
+    }
   });
 
 program
@@ -155,6 +216,11 @@ program
   .command('status')
   .description('show pipeline state counts')
   .action(() => printStatus());
+
+/** Quote a CSV cell if it contains a comma, quote, or newline. */
+function csvCell(v: string): string {
+  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
 
 function printStatus(): void {
   const all = companies.all();

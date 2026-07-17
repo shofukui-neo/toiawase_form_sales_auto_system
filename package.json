@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "cli": "tsx src/index.ts",
     "serve": "tsx src/index.ts serve",
+    "test": "tsx --test tests/*.test.ts",
     "discover-batch": "tsx scripts/discovery_batch.ts",
     "postinstall": "playwright install chromium",
     "testform": "tsx scripts/test_form_server.ts",

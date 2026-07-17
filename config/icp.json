@@ -1,14 +1,25 @@
 {
-  "_comment": "MOCHICA ICP (spec §4-L0). Used for scoring an ingested [name, domain] list. Values are defaults from the spec §13-1 and can be tuned. Excludes are hard filters (score -> 0 -> SUPPRESSED as 'competitor'/policy).",
-  "employees": { "min": 50, "max": 1000 },
+  "_comment": "MOCHICA 詳細ICP v2 (docs/mochica-icp-v2-2026-07.md より). L0スコアリング用。employees=必須帯100-2000、employeesSweet=ピーク300-500(成約1.41x)。targetIndustries=効率業種の細分ラベル。penalizeKeywords=低成約ラベルの減点(除外ではない)。excludeKeywords/competitorAts=ハード抑制→SUPPRESSED。",
+  "employees": { "min": 100, "max": 2000 },
+  "employeesSweet": { "min": 300, "max": 500 },
   "targetIndustries": [
-    "福祉", "介護", "建設", "小売", "飲食", "運輸", "製造", "物流", "サービス", "地方", "JA", "農業協同組合"
+    "流通", "小売", "物販", "ドラッグ", "薬局", "ホームセンター", "生協", "生活協同組合",
+    "金融", "保険", "地銀", "地方銀行", "信用組合",
+    "介護", "保育", "医療法人", "福祉",
+    "メーカー", "製造", "機械", "電気", "電子", "商社",
+    "不動産", "建設", "設備", "運輸", "物流", "サービス",
+    "農業協同組合", "JA"
   ],
   "signals": [
-    "マイナビ", "リクナビ", "新卒", "採用", "エントリー"
+    "マイナビ", "リクナビ", "新卒", "採用", "エントリー", "会社説明会", "採用情報",
+    "saiyou", "recruit", "jinji", "採用担当", "人事"
   ],
   "excludeKeywords": [
     "採用代行", "RPO", "フル委託"
+  ],
+  "penalizeKeywords": [
+    "スーパーマーケット", "自動車専門店", "信用金庫", "信金", "医療機関", "福祉サービス",
+    "化学", "金属製品", "IT", "ソフトウェア", "情報処理", "SES", "建築設計", "広告", "印刷"
   ],
   "competitorAts": [
     "HERP", "sonar", "ジョブカン採用", "i-web", "採用一括かんりくん", "ジョブスイート", "HRMOS"

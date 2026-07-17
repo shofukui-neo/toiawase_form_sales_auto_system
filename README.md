@@ -10,7 +10,7 @@ MOCHICA のフォーム経由アウトバウンド営業を自動化するシス
 
 | レイヤー | ファイル | 役割 |
 |---|---|---|
-| L0 リスト生成 | [src/layers/l0_list.ts](src/layers/l0_list.ts) | CSV取込 + ICPスコアリング + 競合ハード抑制 |
+| L0 リスト生成 | [src/layers/l0_list.ts](src/layers/l0_list.ts) | CSV取込 + **企業HP自動探索**（[l0_homepage.ts](src/layers/l0_homepage.ts)）+ ICPスコアリング + 競合ハード抑制 |
 | L1 フォーム発見 | [src/layers/l1_discovery.ts](src/layers/l1_discovery.ts) | 定番パス→リンク走査→sitemap の段階探索 |
 | L2 構造解析 | [src/layers/l2_parsing.ts](src/layers/l2_parsing.ts) | 辞書マッピング + 構造シグナル + LLMフォールバック + ハニーポット検知 + フラグ検出 + ゲート判定 |
 | L3 文面生成 | [src/layers/l3_content.ts](src/layers/l3_content.ts) | テンプレ + 変数差し込み（決定論的） |
@@ -74,6 +74,40 @@ npm run cli -- status                                 # 各状態の件数
 ```
 
 gate=high を全自動送信するには `plan --auto-high`（§5 の段階自動化。計測して閾値超えたら解禁）。
+
+### 企業HPを自動探索（名前だけのリストから送信まで）
+
+ドメインが無く**企業名だけ**のリストでも、HP（公式サイト）を自動で探索してから
+パイプラインに載せられる。ドメイン列が空の行は Web 検索で公式サイトを特定する
+（[src/layers/l0_homepage.ts](src/layers/l0_homepage.ts) / [src/layers/websearch.ts](src/layers/websearch.ts)）。
+
+```bash
+# 名前だけのCSV/TXT → 公式HPを解決して [name,domain,...] を出力（調査用）
+npm run cli -- resolve scripts/icp-targets-seed.csv --out data/icp-targets-resolved.csv
+
+# 取込と同時にHPを自動解決（ドメイン欄が空の行だけ検索、埋まっている行はそのまま）
+npm run cli -- ingest scripts/icp-targets-seed.csv --resolve
+```
+
+サンプルの ICP v2 準拠ターゲットリスト: [scripts/icp-targets-seed.csv](scripts/icp-targets-seed.csv)
+（効率業種セグメントA〜Dの実企業。名前・業種・都道府県のみでドメイン無し）。
+
+探索の肝は「ページを見つける」ことより**集約サイト（求人媒体・企業DB・SNS・Wikipedia・
+ニュース）を弾いて“会社自身のサイト”に着地する**こと。二重の防御を入れている:
+
+1. **ブロックリスト** — mynavi/rikunabi/baseconnect/salesnow/wikipedia/facebook 等は候補から除外。
+2. **実在検証** — 候補HPを実際に取得し、**社名がそのトップページに出現するか**を確認できた
+   ドメインだけを `search+verified` として採用。会社概要等の一般シグナルだけでは採用しない
+   （*誤ドメイン=誤送信* はブランドを燃やすため。設計の絶対制約）。確認できない候補は
+   `search+unverified`（既定では取込せず、`--accept-unverified` で明示的に許可）。
+
+ISP間借り（例: `komeri.bit.or.jp`）はサブドメインを保持し、共有ドメイン（bit.or.jp）へ
+潰さない。実測（ICP v2 セグメントの実企業10社）で **9/10 を verified で正解、verified の
+精度は 100%**（誤採用ゼロ。1社は unverified として手動確認へ回送）。
+
+> ターゲット企業の考え方は [docs/mochica-icp-v2-2026-07.md](docs/mochica-icp-v2-2026-07.md)（詳細ICP v2）。
+> スコアリング設定は [config/icp.json](config/icp.json) に反映済み（従業員100-2000/ピーク300-500、
+> 効率業種の細分ラベル、低成約ラベルの減点）。
 
 ### A — Web承認ダッシュボード
 

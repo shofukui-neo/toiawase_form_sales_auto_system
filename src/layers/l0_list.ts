@@ -3,6 +3,7 @@ import { companies, suppression, audit } from '../db/repositories.js';
 import { transition } from '../core/stateMachine.js';
 import { loadIcp, type IcpConfig } from '../config.js';
 import { normalizeDomain } from '../utils/url.js';
+import { resolveHomepage } from './l0_homepage.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L0');
@@ -25,6 +26,8 @@ export interface IngestRow {
   industry?: string;
   employees?: number;
   source?: string;
+  /** Prefecture / region hint (not scored; used to disambiguate HP search). */
+  prefecture?: string;
 }
 
 export interface IngestResult {
@@ -79,8 +82,59 @@ function headerIndex(header: string[]): Record<string, number> {
     if (/industry|業界|業種/.test(k)) idx.industry ??= i;
     if (/employee|従業員|規模|人数/.test(k)) idx.employees ??= i;
     if (/source|ソース|媒体|出典/.test(k)) idx.source ??= i;
+    if (/pref|prefecture|都道府県|所在地|地域|エリア/.test(k)) idx.prefecture ??= i;
   });
   return idx;
+}
+
+/** Company-entity forms — a cell containing one is DATA, never a header label.
+ * (Bare 法人 is excluded so a "法人名" header column isn't misread as data.) */
+const LEGAL_TOKEN_RE = /株式会社|有限会社|合同会社|合資会社|合名会社|協同組合|（株）|\(株\)/;
+/** A header cell is a short, pure column keyword (anchored so names don't match). */
+const HEADER_CELL_RE =
+  /^(name|company|会社名?|企業名?|法人名|domain|url|ドメイン|hp|ホームページ|industry|業種|業界|employees?|従業員数?|規模|人数|prefecture|pref|都道府県|所在地|地域|エリア|source|ソース|媒体|出典)$/i;
+
+/**
+ * Decide whether row 0 is a header row. We can't just look for known tokens
+ * because company names themselves contain 会社/法人 — so a row is a header only
+ * when a cell is a *pure* column keyword and no cell looks like data (legal
+ * token or a dotted domain). Prevents eating the first company of a name-only
+ * list whose name happens to contain 株式会社.
+ */
+function looksLikeHeader(row: string[]): boolean {
+  const cells = row.map((c) => c.trim()).filter(Boolean);
+  if (cells.length === 0) return false;
+  if (cells.some((c) => LEGAL_TOKEN_RE.test(c) || /\.[a-z]{2,}/i.test(c))) return false;
+  return cells.some((c) => HEADER_CELL_RE.test(c.toLowerCase()));
+}
+
+/** Parse a companies CSV into raw rows (name required; domain may be empty). */
+export function parseCompaniesCsv(text: string): IngestRow[] {
+  const table = parseCsv(text);
+  if (table.length === 0) return [];
+  const hasHeader = looksLikeHeader(table[0]);
+  const idx = hasHeader ? headerIndex(table[0]) : {};
+  const dataRows = hasHeader ? table.slice(1) : table;
+  // Positional fallbacks (name=0, domain=1) apply ONLY to headerless files — with
+  // a header we must not guess a column that isn't declared (else industry would
+  // masquerade as domain).
+  const pick = (cols: string[], key: string, headerlessIdx?: number) => {
+    const i = idx[key] ?? (hasHeader ? undefined : headerlessIdx);
+    return i !== undefined ? cols[i] : undefined;
+  };
+  return dataRows
+    .map((cols): IngestRow => ({
+      name: (pick(cols, 'name', 0) ?? '').trim(),
+      domain: (pick(cols, 'domain', 1) ?? '').trim(),
+      industry: pick(cols, 'industry')?.trim() || undefined,
+      employees: (() => {
+        const v = pick(cols, 'employees');
+        return v ? Number.parseInt(v.replace(/[^\d]/g, ''), 10) || undefined : undefined;
+      })(),
+      source: pick(cols, 'source')?.trim() || undefined,
+      prefecture: pick(cols, 'prefecture')?.trim() || undefined,
+    }))
+    .filter((r) => r.name);
 }
 
 /**
@@ -100,10 +154,18 @@ export function scoreIcp(row: IngestRow, icp: IcpConfig): { score: number; exclu
   let score = 0.5;
 
   if (row.employees !== undefined) {
-    score += row.employees >= icp.employees.min && row.employees <= icp.employees.max ? 0.2 : -0.3;
+    const inRange = row.employees >= icp.employees.min && row.employees <= icp.employees.max;
+    score += inRange ? 0.2 : -0.3;
+    // ICP v2: extra weight for the sweet band (300–500名, 成約 1.41x).
+    if (inRange && icp.employeesSweet &&
+        row.employees >= icp.employeesSweet.min && row.employees <= icp.employeesSweet.max) {
+      score += 0.15;
+    }
   }
   if (row.industry && icp.targetIndustries.some((t) => row.industry!.includes(t))) score += 0.2;
   if (icp.signals.some((s) => hay.includes(s))) score += 0.1;
+  // ICP v2 soft exclude (減点): low-conversion细分ラベル — penalized, not dropped.
+  if (icp.penalizeKeywords?.some((p) => hay.includes(p))) score -= 0.25;
 
   return { score: Math.max(0, Math.min(1, Number(score.toFixed(3)))), excluded: false };
 }
@@ -145,22 +207,84 @@ export function ingestRows(rows: IngestRow[]): IngestResult {
   return { ingested, suppressed, skipped };
 }
 
-/** Ingest from a CSV file path. */
+/** Ingest from a CSV file path. Rows without a domain are skipped. */
 export function ingestCsv(path: string): IngestResult {
-  const text = readFileSync(path, 'utf8');
-  const table = parseCsv(text);
-  if (table.length === 0) return { ingested: 0, suppressed: 0, skipped: 0 };
-  const idx = headerIndex(table[0]);
-  const dataRows = table.slice(1);
-  const rows: IngestRow[] = dataRows.map((cols) => ({
-    name: idx.name !== undefined ? cols[idx.name] : cols[0],
-    domain: idx.domain !== undefined ? cols[idx.domain] : cols[1],
-    industry: idx.industry !== undefined ? cols[idx.industry] : undefined,
-    employees:
-      idx.employees !== undefined && cols[idx.employees]
-        ? Number.parseInt(cols[idx.employees].replace(/[^\d]/g, ''), 10) || undefined
-        : undefined,
-    source: idx.source !== undefined ? cols[idx.source] : undefined,
-  }));
+  const rows = parseCompaniesCsv(readFileSync(path, 'utf8'));
   return ingestRows(rows);
+}
+
+export interface ResolveIngestOptions {
+  /** Ingest even domains whose homepage could not be verified. Default false. */
+  acceptUnverified?: boolean;
+  /** Per-company progress callback. */
+  onProgress?: (msg: string) => void;
+}
+
+export interface UnresolvedRow {
+  name: string;
+  reason: string;
+  candidate?: string;
+}
+
+export interface ResolveIngestResult extends IngestResult {
+  /** Rows that already had a domain (no search needed). */
+  hadDomain: number;
+  /** Rows whose HP we resolved via web search. */
+  resolved: number;
+  /** Rows we could not confidently resolve (with reason). */
+  unresolved: UnresolvedRow[];
+}
+
+/**
+ * L0 拡張 — ingest a name-only (or partially-filled) CSV, auto-discovering each
+ * missing homepage via web search before scoring/upsert. This is the entry point
+ * for "企業HPも勝手に探してフォーム送る": feed names, the system finds the HP,
+ * then the normal pipeline (discover → plan → send) takes over.
+ */
+export async function ingestCsvWithResolve(
+  path: string,
+  opts: ResolveIngestOptions = {},
+): Promise<ResolveIngestResult> {
+  const rows = parseCompaniesCsv(readFileSync(path, 'utf8'));
+  const resolvedRows: IngestRow[] = [];
+  const unresolved: UnresolvedRow[] = [];
+  let hadDomain = 0;
+  let resolved = 0;
+
+  for (const row of rows) {
+    if (row.domain) {
+      hadDomain++;
+      resolvedRows.push(row);
+      continue;
+    }
+    opts.onProgress?.(`resolving HP: ${row.name}`);
+    const hp = await resolveHomepage(row.name, {
+      industry: row.industry,
+      prefecture: row.prefecture,
+    }).catch((e) => {
+      log.error(`resolve failed ${row.name}: ${(e as Error).message}`);
+      return null;
+    });
+
+    if (!hp) {
+      unresolved.push({ name: row.name, reason: 'no candidate found' });
+      continue;
+    }
+    if (hp.method === 'search+unverified' && !opts.acceptUnverified) {
+      unresolved.push({ name: row.name, reason: 'unverified', candidate: hp.domain });
+      audit.log({ layer: 'L0', action: 'hp_unverified', detail: `${row.name} -> ${hp.domain}` });
+      continue;
+    }
+    resolved++;
+    resolvedRows.push({ ...row, domain: hp.domain, source: row.source ?? 'hp_auto' });
+    audit.log({
+      layer: 'L0',
+      action: 'hp_resolved',
+      detail: `${row.name} -> ${hp.domain} (${hp.method}, conf=${hp.confidence})`,
+    });
+    opts.onProgress?.(`  -> ${hp.domain} (${hp.method}, conf=${hp.confidence})`);
+  }
+
+  const base = ingestRows(resolvedRows);
+  return { ...base, hadDomain, resolved, unresolved };
 }
