@@ -46,6 +46,8 @@ export interface CoverageResult {
   coverage: Coverage;
   subject: string;
   body: string;
+  /** Resolved per-role values L4 will type (post-override) — feeds the edit panel. */
+  values: Partial<Record<FieldRole, string>>;
 }
 
 /**
@@ -174,5 +176,5 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
     honeypots: fields.length - nonTrap.length,
   };
 
-  return { fields, coverage, subject, body };
+  return { fields, coverage, subject, body, values };
 }

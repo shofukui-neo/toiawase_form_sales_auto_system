@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ROOT, config } from '../config.js';
-import type { CompanyRow, FormSchema, RenderedContent, FieldRole } from '../types.js';
+import type { CompanyRow, ContentOverride, FormSchema, RenderedContent, FieldRole } from '../types.js';
+import { contentOverrides } from '../db/repositories.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L3');
@@ -133,7 +134,96 @@ export function renderContent(
     }
   }
 
-  return { subject, body, values };
+  // --- Manual override layer (approval dashboard edit, §13-2) ---
+  // Applied last so a human correction flows into preview, plan AND execute
+  // identically. Split sub-boxes (phone/postal/氏名/フリガナ) are re-derived from
+  // the edited base value so a corrected 電話 still fills the 3-box variant.
+  let finalSubject = subject;
+  let finalBody = body;
+  const ov = loadOverrides(company.id);
+  if (ov) {
+    applyValueOverrides(values, ov.values);
+    if (ov.values.subject != null) finalSubject = ov.values.subject;
+    if (ov.values.message != null) finalBody = ov.values.message;
+  }
+
+  return { subject: finalSubject, body: finalBody, values };
+}
+
+/** Read manual overrides for a company; never throws (DB may be absent in unit tests). */
+function loadOverrides(companyId: number): ContentOverride | undefined {
+  try {
+    return contentOverrides.get(companyId);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Merge dashboard edits into the rendered `values`, re-deriving the split
+ * sub-fields for the base roles that have them. Only keys present in `edits`
+ * are touched; everything else keeps its deterministic default.
+ */
+export function applyValueOverrides(
+  values: Partial<Record<FieldRole, string>>,
+  edits: Partial<Record<FieldRole, string>>,
+): void {
+  const setBase = (role: FieldRole) => edits[role] != null;
+
+  if (setBase('company')) values.company = edits.company!;
+  if (setBase('address')) values.address = edits.address!;
+  if (setBase('department')) values.department = edits.department!;
+  if (setBase('subject')) values.subject = edits.subject!;
+  if (setBase('message')) values.message = edits.message!;
+
+  if (setBase('email')) {
+    values.email = edits.email!;
+    values.email_confirm = edits.email!;
+  }
+
+  if (setBase('name')) {
+    values.name = edits.name!;
+    const [sei, mei] = splitName(edits.name!);
+    if (sei) values.name_sei = sei; else delete values.name_sei;
+    if (mei) values.name_mei = mei; else delete values.name_mei;
+  }
+
+  if (setBase('kana')) {
+    values.kana = edits.kana!;
+    const [ks, km] = splitName(edits.kana!);
+    if (ks) values.kana_sei = ks; else delete values.kana_sei;
+    if (km) values.kana_mei = km; else delete values.kana_mei;
+  }
+
+  if (setBase('phone')) {
+    values.phone = edits.phone!;
+    delete values.phone1; delete values.phone2; delete values.phone3;
+    const pp = edits.phone!.split(/[-‐‑–—―ー－ｰ\s]+/).map((x) => x.trim()).filter(Boolean);
+    if (pp.length >= 3) {
+      values.phone1 = pp[0];
+      values.phone2 = pp[1];
+      values.phone3 = pp.slice(2).join('');
+    } else if (pp.length === 2) {
+      values.phone1 = pp[0];
+      values.phone2 = pp[1];
+    }
+  }
+
+  if (setBase('postal')) {
+    values.postal = edits.postal!;
+    delete values.postal1; delete values.postal2;
+    const pp = edits.postal!.split(/[-‐‑–—―－\s]+/).map((x) => x.trim()).filter(Boolean);
+    if (pp.length >= 2) {
+      values.postal1 = pp[0];
+      values.postal2 = pp.slice(1).join('');
+    } else {
+      const digits = edits.postal!.replace(/[^0-9]/g, '');
+      if (digits.length === 7) {
+        values.postal1 = digits.slice(0, 3);
+        values.postal2 = digits.slice(3);
+      }
+    }
+  }
 }
 
 /** Split a "姓 名" string; best-effort, only used when a form separates them. */

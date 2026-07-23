@@ -79,6 +79,25 @@
       border-radius:8px; padding:10px; margin-top:8px; max-height:260px; overflow:auto; }
     .subj { font-size:12px; margin:8px 0 0; } .subj b{ color:var(--muted); font-weight:600; }
 
+    details.edit { border-top:1px solid var(--line); background:var(--code); padding:10px 16px; }
+    details.edit > summary { cursor:pointer; font-size:13px; font-weight:700; color:var(--accent);
+      list-style:none; display:flex; align-items:center; gap:8px; user-select:none; }
+    details.edit > summary::-webkit-details-marker { display:none; }
+    details.edit > summary::before { content:'▸'; font-size:11px; }
+    details.edit[open] > summary::before { content:'▾'; }
+    .editgrid { display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; margin:12px 0; }
+    @media (max-width:940px){ .editgrid{ grid-template-columns:1fr; } }
+    .editfield { display:flex; flex-direction:column; gap:4px; }
+    .editfield.full { grid-column:1 / -1; }
+    .editfield label { font-size:11px; color:var(--muted); font-weight:600; }
+    .editfield input, .editfield textarea { font:inherit; font-size:13px; padding:7px 9px;
+      border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); width:100%; }
+    .editfield input:focus, .editfield textarea:focus { outline:none; border-color:var(--accent); }
+    .editfield textarea { resize:vertical; font-family:ui-monospace,Menlo,Consolas,monospace; line-height:1.5; }
+    .editfield input.dirty, .editfield textarea.dirty { border-color:var(--warn); background:var(--warnbg); }
+    .editactions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .edithint { font-size:11px; color:var(--muted); }
+
     .actions { display:flex; gap:8px; flex-wrap:wrap; padding:12px 16px; border-top:1px solid var(--line);
       background:var(--code); }
     button { font:inherit; font-size:13px; padding:7px 14px; border-radius:8px; border:1px solid var(--line);
@@ -154,6 +173,30 @@
       </tr>`;
     }
 
+    function editRow(f){
+      const control = f.multiline
+        ? `<textarea data-role="${esc(f.role)}" data-orig="${esc(f.value)}" rows="7" oninput="markDirty(this)">${esc(f.value)}</textarea>`
+        : `<input data-role="${esc(f.role)}" data-orig="${esc(f.value)}" value="${esc(f.value)}" oninput="markDirty(this)">`;
+      return `<div class="editfield${f.multiline?' full':''}">
+        <label>${esc(f.label)} <span class="ftype">${esc(f.role)}</span></label>${control}</div>`;
+    }
+
+    function editPanel(it){
+      if(!it.editable || !it.editable.length) return '';
+      const editedBadge = it.edited ? '<span class="chip warn">編集済み</span>' : '';
+      const resetBtn = it.edited ? `<button class="danger" onclick="resetContent(${it.companyId})">編集をリセット</button>` : '';
+      return `<details class="edit"${it.edited?' open':''}>
+        <summary>✏️ 送信内容を手動で修正・変更 ${editedBadge}</summary>
+        <div class="editgrid">${it.editable.map(editRow).join('')}</div>
+        <div class="editactions">
+          <button class="ok" onclick="saveContent(${it.companyId},false)">保存</button>
+          <button class="primary" onclick="saveContent(${it.companyId},true)">保存して再プレビュー</button>
+          ${resetBtn}
+          <span class="edithint">保存で項目照合ビューに即反映。「再プレビュー」は確認画面スクショも更新（ブラウザ起動・数秒）。</span>
+        </div>
+      </details>`;
+    }
+
     function pendingCard(it){
       const shot = it.screenshot ? `/artifacts/${it.screenshot.split(/[\\\/]/).pop()}` : '';
       const rows = [...it.fields].sort((a,b)=>(STATUS_ORDER[a.status]-STATUS_ORDER[b.status]));
@@ -187,6 +230,7 @@
             <details class="msg"><summary>本文（textarea に入る全文）を表示</summary><div class="msgbox">${esc(it.body||'')}</div></details>
           </div>
         </div>
+        ${editPanel(it)}
         <div class="actions">
           <button class="ok" onclick="act(${it.companyId},'approve')">承認</button>
           <button class="primary" onclick="act(${it.companyId},'approve-execute')">承認して即送信</button>
@@ -243,6 +287,43 @@
       const reason = prompt('抑制理由: opt_out / no_sales_policy / competitor / already_sent','opt_out');
       if(!reason) return;
       try{ await api(`/api/companies/${id}/suppress`,'POST',{reason}); toast(`#${id} を抑制しました`); await load(); }
+      catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
+    }
+
+    // ---- 手動編集（送信内容の修正・変更）----
+    function markDirty(el){ el.classList.toggle('dirty', el.value !== (el.dataset.orig ?? '')); }
+
+    // True while the user is editing (focused in a panel, or has unsaved changes).
+    // Used to suppress the background auto-reload so edits aren't wiped mid-type.
+    function hasActiveEdit(){
+      const ae = document.activeElement;
+      if (ae && ae.closest && ae.closest('details.edit')) return true;
+      return !!document.querySelector('details.edit .dirty');
+    }
+
+    async function saveContent(id, replan){
+      const card = document.querySelector(`.card[data-id="${id}"]`);
+      if(!card) return;
+      const values = {};
+      card.querySelectorAll('.edit [data-role]').forEach(el=>{
+        if(el.value !== (el.dataset.orig ?? '')) values[el.dataset.role] = el.value;
+      });
+      const changed = Object.keys(values).length;
+      try{
+        if(changed){ await api(`/api/companies/${id}/content`,'PUT',{ values }); }
+        if(replan){
+          toast(`#${id} 再プレビュー中…（ブラウザ起動・数秒）`);
+          await api(`/api/companies/${id}/replan`,'POST');
+          toast(`#${id} を保存して再プレビューしました`);
+        } else if(changed){ toast(`#${id} の編集を保存しました（${changed}項目）`); }
+        else { toast('変更はありません'); return; }
+        await load();
+      }catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
+    }
+
+    async function resetContent(id){
+      if(!confirm(`#${id} の手動編集をすべて破棄して既定値に戻しますか？`)) return;
+      try{ await api(`/api/companies/${id}/content/reset`,'POST'); toast(`#${id} の編集をリセットしました`); await load(); }
       catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
 
@@ -308,7 +389,7 @@
     load();
     // Resume the progress view if a bulk send is already running (e.g. page reload mid-run).
     api('/api/execute-all/status').then((s) => { if (s && s.running) pollBulk(); }).catch(() => {});
-    setInterval(load, 15000);
+    setInterval(() => { if (!hasActiveEdit()) load(); }, 15000);
   </script>
 </body>
 </html>

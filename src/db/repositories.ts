@@ -2,6 +2,7 @@ import { db } from './db.js';
 import type {
   CompanyRow,
   CompanyStatus,
+  ContentOverride,
   FormSchema,
   SubmissionStatus,
   SuppressionReason,
@@ -131,6 +132,13 @@ export const submissions = {
       .run(approvedBy, id);
   },
 
+  /** Refresh an existing plan row after a manual edit + re-preview (§13-2 edit). */
+  updatePlan(id: number, input: { contentRendered: string; planScreenshotUrl: string | null }): void {
+    db()
+      .prepare(`UPDATE submissions SET content_rendered = ?, plan_screenshot_url = ? WHERE id = ?`)
+      .run(input.contentRendered, input.planScreenshotUrl, id);
+  },
+
   setResult(id: number, status: SubmissionStatus, detail: string): void {
     db()
       .prepare(
@@ -168,6 +176,40 @@ export const suppression = {
 
   all(): { domain: string; reason: string; created_at: string }[] {
     return db().prepare('SELECT * FROM suppression ORDER BY created_at DESC').all() as any[];
+  },
+};
+
+/* --------------------------- content_overrides --------------------------- */
+
+export const contentOverrides = {
+  /** Manual dashboard edits for a company, or undefined if none. */
+  get(companyId: number): ContentOverride | undefined {
+    const row = db()
+      .prepare('SELECT overrides_json FROM content_overrides WHERE company_id = ?')
+      .get(companyId) as { overrides_json: string } | undefined;
+    if (!row) return undefined;
+    try {
+      const parsed = JSON.parse(row.overrides_json) as ContentOverride;
+      return parsed && parsed.values ? parsed : { values: {} };
+    } catch {
+      return { values: {} };
+    }
+  },
+
+  set(companyId: number, ov: ContentOverride): void {
+    db()
+      .prepare(
+        `INSERT INTO content_overrides (company_id, overrides_json, updated_at)
+         VALUES (@companyId, @json, datetime('now'))
+         ON CONFLICT(company_id) DO UPDATE SET
+           overrides_json = excluded.overrides_json,
+           updated_at = datetime('now')`,
+      )
+      .run({ companyId, json: JSON.stringify(ov) });
+  },
+
+  clear(companyId: number): void {
+    db().prepare('DELETE FROM content_overrides WHERE company_id = ?').run(companyId);
   },
 };
 

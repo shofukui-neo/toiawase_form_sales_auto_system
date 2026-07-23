@@ -137,6 +137,15 @@ export interface FormSchema {
   gate: Gate;
 }
 
+/**
+ * Manual override of the rendered content, entered from the approval dashboard.
+ * Keyed by (base) role; `subject` and `message` roles override the subject/body.
+ * Applied on top of the deterministic L3 render so preview == plan == execute.
+ */
+export interface ContentOverride {
+  values: Partial<Record<FieldRole, string>>;
+}
+
 /** Rendered outbound content (L3). */
 export interface RenderedContent {
   subject: string;

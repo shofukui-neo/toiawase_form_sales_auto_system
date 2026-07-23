@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS submissions (
 CREATE INDEX IF NOT EXISTS idx_submissions_company ON submissions(company_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);
 
+-- Manual edits from the approval dashboard: per-company role->value overrides
+-- applied on top of the deterministic L3 render (preview == plan == execute).
+CREATE TABLE IF NOT EXISTS content_overrides (
+  company_id     INTEGER PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+  overrides_json TEXT NOT NULL,                 -- { values: { <role>: <value> } }
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Cross-cutting suppression list
 CREATE TABLE IF NOT EXISTS suppression (
   domain     TEXT PRIMARY KEY,

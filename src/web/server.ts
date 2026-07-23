@@ -3,9 +3,12 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
-import { companies, submissions, fieldMaps, suppression } from '../db/repositories.js';
+import { companies, submissions, fieldMaps, suppression, contentOverrides, audit } from '../db/repositories.js';
 import { listApproved, approve, reject, suppressCompany, excludeIneligiblePending } from '../pipeline/approval.js';
 import { runExecute } from '../pipeline/pipeline.js';
+import { renderContent } from '../layers/l3_content.js';
+import { planSubmission } from '../layers/l4_submit.js';
+import type { ContentOverride, FieldRole } from '../types.js';
 import { canSendNow, nextSendDelayMs } from '../crosscutting/pacing.js';
 import { computeCoverage } from '../layers/coverage.js';
 import { classifyEligibility } from '../crosscutting/eligibility.js';
@@ -139,7 +142,7 @@ export function createServer() {
           companyId: c.id, name: c.name, domain: c.domain, formUrl: c.form_url,
           gate: 'unknown', mappingConfidence: 0, hasConfirmScreen: false, hasCaptcha: 'none',
           screenshot: sub?.plan_screenshot_url ?? null, subject: '', body: sub?.content_rendered ?? '',
-          submissionId: sub?.id ?? null, fields: [],
+          submissionId: sub?.id ?? null, fields: [], editable: [], edited: false,
           coverage: { requiredTotal: 0, requiredFilled: 0, missing: 0, suspect: 0, honeypots: 0 },
         };
       }
@@ -210,6 +213,70 @@ export function createServer() {
       suppression.remove(c.domain);
       transition(id, 'PENDING_APPROVAL', { force: true, actor: approver(), detail: 'manual requeue' });
       res.json({ ok: true });
+    } catch (e) {
+      res.status(400).send((e as Error).message);
+    }
+  });
+
+  // Roles a human may edit from the dashboard (whitelist — never accept arbitrary keys).
+  const EDITABLE_ROLES: ReadonlySet<FieldRole> = new Set<FieldRole>([
+    'company', 'name', 'kana', 'email', 'phone', 'postal', 'address', 'department', 'subject', 'message',
+  ]);
+
+  // Save manual edits (role -> value). Merges with any existing override; the
+  // field-matching view (and future plan/execute) picks these up immediately.
+  app.put('/api/companies/:id/content', (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const c = companies.byId(id);
+      if (!c) throw new Error(`company ${id} not found`);
+      const incoming = (req.body?.values ?? {}) as Record<string, unknown>;
+      const cur = contentOverrides.get(id)?.values ?? {};
+      const merged: Partial<Record<FieldRole, string>> = { ...cur };
+      let changed = 0;
+      for (const [role, val] of Object.entries(incoming)) {
+        if (!EDITABLE_ROLES.has(role as FieldRole)) continue;
+        merged[role as FieldRole] = String(val ?? '');
+        changed++;
+      }
+      if (changed === 0) throw new Error('編集可能な項目が指定されていません');
+      const ov: ContentOverride = { values: merged };
+      contentOverrides.set(id, ov);
+      audit.log({ companyId: id, layer: 'web', action: 'content_edit', actor: approver(), detail: Object.keys(incoming).join(',') });
+      res.json({ ok: true, edited: true });
+    } catch (e) {
+      res.status(400).send((e as Error).message);
+    }
+  });
+
+  // Discard all manual edits for a company (restore the deterministic render).
+  app.post('/api/companies/:id/content/reset', (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      contentOverrides.clear(id);
+      audit.log({ companyId: id, layer: 'web', action: 'content_reset', actor: approver() });
+      res.json({ ok: true, edited: false });
+    } catch (e) {
+      res.status(400).send((e as Error).message);
+    }
+  });
+
+  // Re-run the Plan dry-run with current (edited) content so the preview
+  // screenshot reflects the edits. Still never performs a final submit.
+  app.post('/api/companies/:id/replan', async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const c = companies.byId(id);
+      if (!c) throw new Error(`company ${id} not found`);
+      if (c.status !== 'PENDING_APPROVAL') throw new Error(`#${id} は ${c.status} のため再プレビューできません`);
+      const schema = fieldMaps.latest(id);
+      if (!schema) throw new Error(`no schema for #${id}`);
+      const content = renderContent(c, schema);
+      const plan = await planSubmission(c, schema, content);
+      const sub = submissions.latestForCompany(id);
+      if (sub) submissions.updatePlan(sub.id, { contentRendered: content.body, planScreenshotUrl: plan.screenshotPath });
+      audit.log({ companyId: id, layer: 'web', action: 'replan', actor: approver(), detail: plan.strategy });
+      res.json({ ok: true, screenshot: plan.screenshotPath });
     } catch (e) {
       res.status(400).send((e as Error).message);
     }
