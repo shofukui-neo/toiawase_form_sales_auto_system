@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
 import { companies, submissions, fieldMaps, suppression, contentOverrides, audit } from '../db/repositories.js';
 import { listApproved, approve, reject, suppressCompany, excludeIneligiblePending } from '../pipeline/approval.js';
-import { runExecute } from '../pipeline/pipeline.js';
+import { runExecute, discoverAndParse, buildPlan } from '../pipeline/pipeline.js';
+import { ingestRows, ingestRowsWithResolve, parseCompaniesCsv, type IngestRow, type UnresolvedRow } from '../layers/l0_list.js';
 import { renderContent } from '../layers/l3_content.js';
 import { planSubmission } from '../layers/l4_submit.js';
 import type { ContentOverride, FieldRole } from '../types.js';
@@ -109,6 +110,125 @@ async function runBulk(batch: CompanyRow[]): Promise<void> {
 }
 
 /**
+ * リスト取り込み ("intake") job state. One click ingests a pasted / uploaded
+ * company list (L0) and — optionally — runs the discovery + plan pipeline
+ * (L1→L4 Plan) so companies flow straight into the approval queue. Runs in the
+ * background (Playwright discovery is slow); the dashboard polls
+ * `/api/import/status` for live progress. Never sends anything — final submit
+ * still goes through the approval UI.
+ */
+interface IntakeLog {
+  company: string;
+  status: string;
+  detail?: string;
+}
+interface IntakeState {
+  running: boolean;
+  /** ingest → resolve → pipeline → done */
+  phase: 'ingest' | 'resolve' | 'pipeline' | 'done';
+  message: string;
+  // L0 ingest tallies
+  ingested: number;
+  suppressed: number;
+  skipped: number;
+  hadDomain: number;
+  resolved: number;
+  unresolved: UnresolvedRow[];
+  // pipeline (discover + plan) tallies
+  pipeline: boolean;
+  total: number;
+  done: number;
+  current: string | null;
+  pendingApproval: number;
+  notFound: number;
+  failed: number;
+  excluded: number;
+  logs: IntakeLog[];
+  startedAt: string;
+  finishedAt: string | null;
+}
+let intake: IntakeState | null = null;
+
+interface IntakeOptions {
+  resolve: boolean;
+  acceptUnverified: boolean;
+  pipeline: boolean;
+}
+
+/** Human label for a company's pipeline status (used in the intake log). */
+const STATUS_JA: Record<string, string> = {
+  NEW: '新規', DISCOVERING: '発見中', FORM_FOUND: 'フォーム発見', PARSING: '解析中',
+  PARSED: '解析済み', PLAN_READY: 'プラン作成中', PENDING_APPROVAL: '承認待ち',
+  APPROVED: '承認済み', SUBMITTING: '送信準備', SUBMITTED_SUCCESS: '送信成功',
+  SUBMITTED_FAILED: '送信失敗', FORM_NOT_FOUND: 'フォーム未発見', PARSE_FAILED: '解析失敗',
+  CAPTCHA_BLOCKED: 'CAPTCHA', NEEDS_REVIEW: '要確認', REJECTED: '却下', SUPPRESSED: '除外',
+};
+
+/** Ingest a list, then (optionally) discover + plan each new company. Updates `intake`. */
+async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> {
+  intake = {
+    running: true,
+    phase: opts.resolve ? 'resolve' : 'ingest',
+    message: opts.resolve ? 'HPを探索しながら取り込み中…' : '取り込み中…',
+    ingested: 0, suppressed: 0, skipped: 0, hadDomain: 0, resolved: 0, unresolved: [],
+    pipeline: opts.pipeline,
+    total: 0, done: 0, current: null,
+    pendingApproval: 0, notFound: 0, failed: 0, excluded: 0,
+    logs: [],
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+  };
+  try {
+    // ---- L0 ingest (optionally auto-resolving missing homepages) ----
+    if (opts.resolve) {
+      const r = await ingestRowsWithResolve(rows, {
+        acceptUnverified: opts.acceptUnverified,
+        onProgress: (m) => { if (intake) intake.message = m; },
+      });
+      intake.ingested = r.ingested; intake.suppressed = r.suppressed; intake.skipped = r.skipped;
+      intake.hadDomain = r.hadDomain; intake.resolved = r.resolved; intake.unresolved = r.unresolved;
+    } else {
+      const r = ingestRows(rows);
+      intake.ingested = r.ingested; intake.suppressed = r.suppressed; intake.skipped = r.skipped;
+    }
+
+    // ---- L1 discover + L2 parse + L4 Plan for every freshly-ingested company ----
+    if (opts.pipeline) {
+      intake.phase = 'pipeline';
+      intake.message = 'フォームを発見して確認プランを作成中…';
+      const batch = companies.byStatus('NEW');
+      intake.total = batch.length;
+      for (const c0 of batch) {
+        const c = companies.byId(c0.id);
+        if (!c) { intake.done++; continue; }
+        intake.current = `#${c.id} ${c.name}`;
+        try {
+          await discoverAndParse(c.id);
+          if (companies.byId(c.id)?.status === 'PARSED') await buildPlan(c.id);
+        } catch (e) {
+          intake.logs.push({ company: `#${c.id} ${c.name}`, status: 'error', detail: (e as Error).message });
+        }
+        const st = companies.byId(c.id)?.status ?? 'unknown';
+        if (st === 'PENDING_APPROVAL' || st === 'SUBMITTING') intake.pendingApproval++;
+        else if (st === 'FORM_NOT_FOUND') intake.notFound++;
+        else if (st === 'PARSE_FAILED') intake.failed++;
+        else if (st === 'SUPPRESSED') intake.excluded++;
+        intake.logs.push({ company: `#${c.id} ${c.name}`, status: STATUS_JA[st] ?? st });
+        intake.done++;
+      }
+    }
+  } finally {
+    if (intake) {
+      intake.phase = 'done';
+      intake.running = false;
+      intake.current = null;
+      intake.message = '完了';
+      intake.finishedAt = new Date().toISOString();
+    }
+  }
+}
+
+/**
  * A (spec §13-2): Web approval dashboard. Thin HTTP layer over the same
  * approval operations the CLI uses — screenshot preview, approve / reject /
  * suppress, and per-company Execute (respecting compliance + pacing).
@@ -129,6 +249,51 @@ export function createServer() {
     const pace = canSendNow();
     counts['_送信可'] = pace.allowed ? 1 : 0;
     res.json(counts);
+  });
+
+  // リスト取り込み: parse a pasted / uploaded list and kick off a background
+  // intake job (L0 ingest → optional L1/L2/L4-Plan). Returns immediately; the
+  // dashboard polls /api/import/status.
+  app.post('/api/import', (req, res) => {
+    if (intake?.running) {
+      return res.json({ started: 0, message: '取り込みはすでに実行中です', running: true });
+    }
+    const text = String(req.body?.text ?? '');
+    const rows = parseCompaniesCsv(text);
+    if (rows.length === 0) {
+      return res.json({ started: 0, message: '企業が見つかりません（会社名の列が必要です）' });
+    }
+    const opts: IntakeOptions = {
+      resolve: req.body?.resolve === true,
+      acceptUnverified: req.body?.acceptUnverified === true,
+      pipeline: req.body?.pipeline !== false, // default on
+    };
+    void runIntake(rows, opts).catch((e) => log.error(`intake failed: ${(e as Error).message}`));
+    log.info(`リスト取り込みを開始: ${rows.length} 社 (resolve=${opts.resolve} pipeline=${opts.pipeline})`);
+    return res.json({ started: rows.length });
+  });
+
+  app.get('/api/import/status', (_req, res) => res.json(intake ?? { running: false }));
+
+  // Preview a pasted list without ingesting — how many rows parse, and a sample.
+  // Lets the operator sanity-check column mapping before committing.
+  app.post('/api/import/preview', (req, res) => {
+    const rows = parseCompaniesCsv(String(req.body?.text ?? ''));
+    res.json({
+      total: rows.length,
+      withDomain: rows.filter((r) => r.domain).length,
+      sample: rows.slice(0, 8),
+    });
+  });
+
+  // Every company with its pipeline status — the intake tab's overview table.
+  app.get('/api/companies', (_req, res) => {
+    res.json(
+      companies.all().map((c) => ({
+        id: c.id, name: c.name, domain: c.domain, status: c.status,
+        statusJa: STATUS_JA[c.status] ?? c.status, icpScore: c.icp_score, formUrl: c.form_url,
+      })),
+    );
   });
 
   // Field-by-field review for each pending plan: what value goes into each

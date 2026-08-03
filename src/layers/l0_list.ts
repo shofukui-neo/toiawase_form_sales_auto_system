@@ -245,7 +245,18 @@ export async function ingestCsvWithResolve(
   path: string,
   opts: ResolveIngestOptions = {},
 ): Promise<ResolveIngestResult> {
-  const rows = parseCompaniesCsv(readFileSync(path, 'utf8'));
+  return ingestRowsWithResolve(parseCompaniesCsv(readFileSync(path, 'utf8')), opts);
+}
+
+/**
+ * Same as {@link ingestCsvWithResolve} but from already-parsed rows — the entry
+ * point the web intake job uses (list pasted / uploaded in the browser, parsed
+ * client-side into rows, then resolved + ingested here).
+ */
+export async function ingestRowsWithResolve(
+  rows: IngestRow[],
+  opts: ResolveIngestOptions = {},
+): Promise<ResolveIngestResult> {
   const resolvedRows: IngestRow[] = [];
   const unresolved: UnresolvedRow[] = [];
   let hadDomain = 0;
