@@ -6,7 +6,8 @@ import { config } from '../config.js';
 import { companies, submissions, fieldMaps, suppression, contentOverrides, audit } from '../db/repositories.js';
 import { listApproved, approve, reject, suppressCompany, excludeIneligiblePending } from '../pipeline/approval.js';
 import { runExecute, discoverAndParse, buildPlan } from '../pipeline/pipeline.js';
-import { ingestRows, ingestRowsWithResolve, parseCompaniesCsv, type IngestRow, type UnresolvedRow } from '../layers/l0_list.js';
+import { detectColumns, ingestRows, ingestRowsWithResolve, parseCompaniesCsv, type IngestResult, type IngestRow, type UnresolvedRow } from '../layers/l0_list.js';
+import { normalizeDomain } from '../utils/url.js';
 import { renderContent } from '../layers/l3_content.js';
 import { planSubmission } from '../layers/l4_submit.js';
 import type { ContentOverride, FieldRole } from '../types.js';
@@ -133,7 +134,12 @@ interface IntakeState {
   skipped: number;
   hadDomain: number;
   resolved: number;
+  requeued: number;
   unresolved: UnresolvedRow[];
+  /** Names dropped for having no domain (HP自動探索 off). */
+  noDomain: string[];
+  /** Mis-mapped-column warning: one domain claimed by several companies. */
+  collisions: { domain: string; names: string[] }[];
   // pipeline (discover + plan) tallies
   pipeline: boolean;
   total: number;
@@ -170,7 +176,8 @@ async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> 
     running: true,
     phase: opts.resolve ? 'resolve' : 'ingest',
     message: opts.resolve ? 'HPを探索しながら取り込み中…' : '取り込み中…',
-    ingested: 0, suppressed: 0, skipped: 0, hadDomain: 0, resolved: 0, unresolved: [],
+    ingested: 0, suppressed: 0, skipped: 0, hadDomain: 0, resolved: 0, requeued: 0,
+    unresolved: [], noDomain: [], collisions: [],
     pipeline: opts.pipeline,
     total: 0, done: 0, current: null,
     pendingApproval: 0, notFound: 0, failed: 0, excluded: 0,
@@ -180,27 +187,42 @@ async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> 
   };
   try {
     // ---- L0 ingest (optionally auto-resolving missing homepages) ----
+    let r: IngestResult;
     if (opts.resolve) {
-      const r = await ingestRowsWithResolve(rows, {
+      const rr = await ingestRowsWithResolve(rows, {
         acceptUnverified: opts.acceptUnverified,
         onProgress: (m) => { if (intake) intake.message = m; },
       });
-      intake.ingested = r.ingested; intake.suppressed = r.suppressed; intake.skipped = r.skipped;
-      intake.hadDomain = r.hadDomain; intake.resolved = r.resolved; intake.unresolved = r.unresolved;
+      intake.hadDomain = rr.hadDomain; intake.resolved = rr.resolved; intake.unresolved = rr.unresolved;
+      r = rr;
     } else {
-      const r = ingestRows(rows);
-      intake.ingested = r.ingested; intake.suppressed = r.suppressed; intake.skipped = r.skipped;
+      r = ingestRows(rows);
     }
+    intake.ingested = r.ingested; intake.suppressed = r.suppressed; intake.skipped = r.skipped;
+    intake.requeued = r.requeued; intake.noDomain = r.noDomain; intake.collisions = r.collisions;
 
     // ---- L1 discover + L2 parse + L4 Plan for every freshly-ingested company ----
+    // Drive exactly the companies this run ingested — not every NEW row in the
+    // DB — so the progress counters match the list the operator just pasted.
     if (opts.pipeline) {
       intake.phase = 'pipeline';
       intake.message = 'フォームを発見して確認プランを作成中…';
-      const batch = companies.byStatus('NEW');
+      const batch = r.companyIds.map((id) => companies.byId(id)).filter((c): c is CompanyRow => !!c);
       intake.total = batch.length;
       for (const c0 of batch) {
         const c = companies.byId(c0.id);
         if (!c) { intake.done++; continue; }
+        // Already past discovery from an earlier import — leave it where it is,
+        // but say so instead of dropping it out of the tally silently.
+        if (c.status !== 'NEW') {
+          if (c.status === 'PENDING_APPROVAL' || c.status === 'SUBMITTING') intake.pendingApproval++;
+          intake.logs.push({
+            company: `#${c.id} ${c.name}`,
+            status: `${STATUS_JA[c.status] ?? c.status}（取り込み済み・処理をスキップ）`,
+          });
+          intake.done++;
+          continue;
+        }
         intake.current = `#${c.id} ${c.name}`;
         try {
           await discoverAndParse(c.id);
@@ -275,13 +297,26 @@ export function createServer() {
 
   app.get('/api/import/status', (_req, res) => res.json(intake ?? { running: false }));
 
-  // Preview a pasted list without ingesting — how many rows parse, and a sample.
-  // Lets the operator sanity-check column mapping before committing.
+  // Preview a pasted list without ingesting — how many rows parse, which columns
+  // were recognised, and whether several companies would land on one domain
+  // (the signature of a mis-mapped URL column). Lets the operator sanity-check
+  // the mapping before committing.
   app.post('/api/import/preview', (req, res) => {
-    const rows = parseCompaniesCsv(String(req.body?.text ?? ''));
+    const text = String(req.body?.text ?? '');
+    const rows = parseCompaniesCsv(text);
+    const byDomain = new Map<string, Set<string>>();
+    for (const r of rows) {
+      if (!r.domain) continue;
+      const d = normalizeDomain(r.domain);
+      (byDomain.get(d) ?? byDomain.set(d, new Set()).get(d)!).add(r.name);
+    }
     res.json({
       total: rows.length,
       withDomain: rows.filter((r) => r.domain).length,
+      columns: detectColumns(text),
+      collisions: [...byDomain.entries()]
+        .filter(([, names]) => names.size > 1)
+        .map(([domain, names]) => ({ domain, names: [...names] })),
       sample: rows.slice(0, 8),
     });
   });

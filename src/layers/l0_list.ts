@@ -34,7 +34,20 @@ export interface IngestResult {
   ingested: number;
   suppressed: number;
   skipped: number;
+  /** Rows dropped for having no domain (name-only rows without --resolve). */
+  noDomain: string[];
+  /** One domain claimed by two or more differently-named rows — almost always a
+   * mis-mapped column (a CRM/lead URL taken as the company site). */
+  collisions: { domain: string; names: string[] }[];
+  /** Companies (re-)entering the pipeline; the caller drives discovery on these. */
+  companyIds: number[];
+  /** Re-imported companies whose failed run was reset so it retries. */
+  requeued: number;
 }
+
+/** Terminal states a re-import is allowed to retry (nothing was sent, and the
+ * exclusion wasn't a human/compliance decision). */
+const RETRYABLE_STATUSES = new Set(['FORM_NOT_FOUND', 'PARSE_FAILED']);
 
 /** Minimal CSV parser (handles quoted fields + commas inside quotes). */
 function parseCsv(text: string): string[][] {
@@ -72,27 +85,81 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
-/** Map header names (JP or EN) to canonical column keys. */
+/**
+ * Columns of a CRM/SFA export that describe the *lead record* or the person —
+ * never the company. Matched before any role rule, because several of them
+ * contain a role keyword: `リードURL` is the CRM's own lead page (same host on
+ * every row), and taking it as the company website collapses the whole list
+ * onto one domain — `companies.domain` is UNIQUE, so every company but the last
+ * silently disappears and the one survivor gets discovered against the CRM.
+ */
+const NON_COMPANY_HEADERS: readonly RegExp[] = [
+  /^(?:リード|lead)\s*(?:url|id|ｉｄ|ステージ|stage|所有者|owner|状態|status|スコア|score)$/i,
+  /担当者|^担当$|役職|部署|部門|氏名|^姓$|^名$/,
+  /電話|^tel$|fax|携帯/i,
+  /コール|架電|通話|^call/i,
+  /備考|メモ|コメント|^comment|^note/i,
+  /日時|日付|^date$|^datetime$/i,
+  /^(?:メール(?:アドレス)?|e-?mail|mail)$/i,
+];
+
+/** Exact column labels → canonical key. Checked first, so `Webサイト` wins the
+ * domain slot over a fuzzy `url` hit elsewhere in the row. */
+const EXACT_HEADER_RULES: readonly (readonly [string, RegExp])[] = [
+  ['domain', /^(?:web\s*サイト|web\s*site|website|ホームページ|hp|url|ドメイン|domain|(?:会社|企業|自社|公式|コーポレート)\s*(?:url|サイト|hp|ホームページ))$/i],
+  ['name', /^(?:会社名|企業名|法人名|社名|団体名|取引先名?|company(?:\s*name)?|name)$/i],
+  ['employees', /^(?:従業員数?|従業員規模|社員数|規模|人数|employees?|(?:company\s*)?size)$/i],
+  ['industry', /^(?:業種|業界|industry|sector)$/i],
+  ['prefecture', /^(?:都道府県|府県|所在地|地域|エリア|pref(?:ecture)?|area|region)$/i],
+  ['source', /^(?:出典|媒体|ソース|流入元|(?:リード|lead)\s*(?:ソース|source)|source)$/i],
+];
+
+/** Substring fallbacks, applied only to columns no exact rule claimed. */
+const FUZZY_HEADER_RULES: readonly (readonly [string, RegExp])[] = [
+  ['domain', /ホームページ|ドメイン|domain|url|サイト|\bhp\b/i],
+  ['name', /会社|企業|法人|社名|company|name/i],
+  ['employees', /従業員|規模|人数|employee/i],
+  ['industry', /業種|業界|industry/i],
+  ['prefecture', /都道府県|所在地|地域|エリア|pref/i],
+  ['source', /出典|媒体|ソース|source/i],
+];
+
+/**
+ * Map header cells to canonical column keys (JP or EN). Two passes — exact
+ * labels first, then substring fallbacks — and each column may claim only one
+ * key, so `会社URL` lands on `domain` instead of being double-counted as `name`.
+ */
 function headerIndex(header: string[]): Record<string, number> {
   const idx: Record<string, number> = {};
-  header.forEach((h, i) => {
-    const k = h.trim().toLowerCase();
-    if (/name|会社|企業|法人/.test(k)) idx.name ??= i;
-    if (/domain|url|ドメイン|hp|ホームページ/.test(k)) idx.domain ??= i;
-    if (/industry|業界|業種/.test(k)) idx.industry ??= i;
-    if (/employee|従業員|規模|人数/.test(k)) idx.employees ??= i;
-    if (/source|ソース|媒体|出典/.test(k)) idx.source ??= i;
-    if (/pref|prefecture|都道府県|所在地|地域|エリア/.test(k)) idx.prefecture ??= i;
-  });
+  const claimed = new Set<number>();
+  const cells = header.map((h) => h.trim().toLowerCase());
+  const assign = (rules: readonly (readonly [string, RegExp])[]) => {
+    cells.forEach((k, i) => {
+      if (!k || claimed.has(i) || NON_COMPANY_HEADERS.some((re) => re.test(k))) return;
+      const hit = rules.find(([, re]) => re.test(k));
+      if (!hit || idx[hit[0]] !== undefined) return;
+      idx[hit[0]] = i;
+      claimed.add(i);
+    });
+  };
+  assign(EXACT_HEADER_RULES);
+  assign(FUZZY_HEADER_RULES);
   return idx;
 }
 
 /** Company-entity forms — a cell containing one is DATA, never a header label.
  * (Bare 法人 is excluded so a "法人名" header column isn't misread as data.) */
 const LEGAL_TOKEN_RE = /株式会社|有限会社|合同会社|合資会社|合名会社|協同組合|（株）|\(株\)/;
-/** A header cell is a short, pure column keyword (anchored so names don't match). */
-const HEADER_CELL_RE =
-  /^(name|company|会社名?|企業名?|法人名|domain|url|ドメイン|hp|ホームページ|industry|業種|業界|employees?|従業員数?|規模|人数|prefecture|pref|都道府県|所在地|地域|エリア|source|ソース|媒体|出典)$/i;
+
+/** A header cell is a pure column label — either a role we map or a CRM column. */
+function isHeaderCell(cell: string): boolean {
+  const k = cell.trim().toLowerCase();
+  if (!k) return false;
+  return (
+    EXACT_HEADER_RULES.some(([, re]) => re.test(k)) ||
+    NON_COMPANY_HEADERS.some((re) => re.test(k))
+  );
+}
 
 /**
  * Decide whether row 0 is a header row. We can't just look for known tokens
@@ -105,7 +172,18 @@ function looksLikeHeader(row: string[]): boolean {
   const cells = row.map((c) => c.trim()).filter(Boolean);
   if (cells.length === 0) return false;
   if (cells.some((c) => LEGAL_TOKEN_RE.test(c) || /\.[a-z]{2,}/i.test(c))) return false;
-  return cells.some((c) => HEADER_CELL_RE.test(c.toLowerCase()));
+  return cells.some(isHeaderCell);
+}
+
+/** Which canonical columns a header row resolves to — surfaced in the intake
+ * preview so a mis-mapped list is visible before it is committed. */
+export function detectColumns(text: string): Record<string, string> {
+  const table = parseCsv(text);
+  if (table.length === 0 || !looksLikeHeader(table[0])) return {};
+  const idx = headerIndex(table[0]);
+  const out: Record<string, string> = {};
+  for (const [key, i] of Object.entries(idx)) out[key] = table[0][i]?.trim() ?? '';
+  return out;
 }
 
 /** Parse a companies CSV into raw rows (name required; domain may be empty). */
@@ -176,14 +254,24 @@ export function ingestRows(rows: IngestRow[]): IngestResult {
   let ingested = 0;
   let suppressed = 0;
   let skipped = 0;
+  let requeued = 0;
+  const noDomain: string[] = [];
+  const companyIds: number[] = [];
+  // domain -> distinct names seen in this batch, to catch a mis-mapped URL column.
+  const byDomain = new Map<string, string[]>();
 
   for (const raw of rows) {
     const domain = normalizeDomain(raw.domain || '');
     const name = raw.name?.trim();
     if (!domain || !name) {
       skipped++;
+      if (name) noDomain.push(name);
       continue;
     }
+    const names = byDomain.get(domain) ?? [];
+    if (!names.includes(name)) names.push(name);
+    byDomain.set(domain, names);
+
     const row: IngestRow = { ...raw, domain, name };
     const { score, excluded } = scoreIcp(row, icp);
     const company = companies.upsert({
@@ -199,12 +287,29 @@ export function ingestRows(rows: IngestRow[]): IngestResult {
         transition(company.id, 'SUPPRESSED', { force: true, detail: 'competitor/exclude at ingest' });
       }
       suppressed++;
-    } else {
-      ingested++;
+      continue;
     }
+    // Re-importing a company whose previous run dead-ended (FORM_NOT_FOUND is a
+    // terminal state) must actually retry it — otherwise the row is upserted and
+    // then silently ignored, and it never reaches the approval queue.
+    if (RETRYABLE_STATUSES.has(company.status)) {
+      transition(company.id, 'NEW', { force: true, detail: 're-ingest retry' });
+      requeued++;
+    }
+    companyIds.push(company.id);
+    ingested++;
   }
-  log.info(`ingested=${ingested} suppressed=${suppressed} skipped=${skipped}`);
-  return { ingested, suppressed, skipped };
+
+  const collisions = [...byDomain.entries()]
+    .filter(([, names]) => names.length > 1)
+    .map(([domain, names]) => ({ domain, names }));
+  for (const c of collisions) {
+    log.warn(`domain collision: ${c.domain} claimed by ${c.names.length} companies (${c.names.join(' / ')})`);
+    audit.log({ layer: 'L0', action: 'domain_collision', detail: `${c.domain}: ${c.names.join(' / ')}` });
+  }
+
+  log.info(`ingested=${ingested} suppressed=${suppressed} skipped=${skipped} requeued=${requeued}`);
+  return { ingested, suppressed, skipped, noDomain, collisions, companyIds, requeued };
 }
 
 /** Ingest from a CSV file path. Rows without a domain are skipped. */

@@ -17,6 +17,7 @@
     "postinstall": "playwright install chromium",
     "testform": "tsx scripts/test_form_server.ts",
     "seed": "tsx scripts/seed_demo.ts",
+    "purge-demo": "tsx scripts/purge_demo.ts",
     "e2e": "tsx scripts/e2e_local.ts"
   },
   "dependencies": {
