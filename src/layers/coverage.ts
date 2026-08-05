@@ -1,7 +1,7 @@
 import type { CompanyRow, FormSchema, FieldRole, DetectedField } from '../types.js';
 import { SPLIT_TO_BASE } from '../types.js';
 import { renderContent } from './l3_content.js';
-import { shouldFillField } from './fillPolicy.js';
+import { shouldFillField, resolveFieldValue } from './fillPolicy.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('coverage');
@@ -39,6 +39,8 @@ export interface Coverage {
   missing: number;
   suspect: number;
   honeypots: number;
+  /** Fields whose value exceeds the control's maxlength — silently truncated. */
+  overflow: number;
 }
 
 export interface CoverageResult {
@@ -63,7 +65,7 @@ const ROLE_LABEL_HINTS: Partial<Record<FieldRole, RegExp>> = {
   email: /メール|mail|e-?mail|アドレス|_mail|mailaddr/i,
   phone: /電話|TEL|tel|phone|携帯|連絡先|denwa|ﾃﾞﾝﾜ/i,
   postal: /郵便|〒|zip|postal|postcode|ゆうびん|yubin/i,
-  address: /住所|所在地|address|addr|都道府県|市区町村|番地|ビル|建物|丁目|pref/i,
+  address: /住所|所在地|address|addr|都道府県|市区町村|番地|ビル|建物|マンション|丁目|pref|city|street/i,
   department: /部署|部門|役職|所属|department|division|position/i,
   subject: /件名|題名|タイトル|用件|subject|title/i,
   message: /内容|本文|お問い?合わせ|問合|ご相談|相談|メッセージ|備考|詳細|質問|ご要望|message|comment|body|inquiry|question|quest|honbun/i,
@@ -98,8 +100,10 @@ function short(v: string, n = 90): string {
 function roleJp(role: FieldRole): string {
   const map: Partial<Record<FieldRole, string>> = {
     company: '会社名', name: '氏名', name_sei: '姓', name_mei: '名', kana: 'フリガナ',
+    kana_sei: 'セイ', kana_mei: 'メイ',
     email: 'メール', email_confirm: 'メール(確認)', phone: '電話番号', postal: '郵便番号',
-    address: '住所', department: '部署', subject: '件名', message: '本文',
+    address: '住所', address_pref: '都道府県', address_city: '市区町村',
+    address_street: '番地・建物名', department: '部署', subject: '件名', message: '本文',
   };
   return map[role] ?? role;
 }
@@ -125,6 +129,7 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
     if (f) mappedLabels.add(labelOf(f));
   }
 
+  let overflow = 0;
   const fields: FieldReview[] = schema.fields.map((f) => {
     const label = labelOf(f);
     const m = schema.mappings.find((mm) => mm.selector === f.selector);
@@ -138,18 +143,32 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
       return { ...base, value: m?.value ?? '（実行時に自動選択）', status: 'auto', note: '自動選択（要確認）' };
     }
 
-    if (role && values[role]) {
+    // Resolve through the same helper L4 uses, so the preview shows the exact
+    // string that will be typed (ふりがな→ひらがな変換, 携帯欄→携帯番号 を含む).
+    const resolved = role ? resolveFieldValue(f, role, values) : undefined;
+    if (role && resolved) {
       if (!shouldFillField(f, role)) {
         return { ...base, value: '—（任意・入力しない）', status: 'optional', note: '' };
       }
-      const value = short(values[role]!);
+      const value = short(resolved);
       if (!fieldMatchesRole(f, role)) {
         return { ...base, value, status: 'suspect', note: `「${label}」に ${roleJp(role)} の値が入る可能性` };
+      }
+      // A maxlength shorter than the value means the browser silently truncates —
+      // a half-sentence pitch reaching a real recipient. Flag it for a human.
+      if (f.maxLength && resolved.length > f.maxLength) {
+        overflow++;
+        return {
+          ...base,
+          value,
+          status: 'suspect',
+          note: `入力上限 ${f.maxLength} 文字を超過（${resolved.length} 文字）— 途中で切れます`,
+        };
       }
       return { ...base, value, status: 'ok', note: '' };
     }
 
-    if (role && !values[role]) {
+    if (role && !resolved) {
       const status: FieldStatus = f.required ? 'missing' : 'optional';
       return { ...base, value: '（値なし）', status, note: f.required ? '必須だが値が未設定' : '' };
     }
@@ -174,6 +193,7 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
     missing: requiredFields.filter((f) => f.status === 'missing').length,
     suspect: nonTrap.filter((f) => f.status === 'suspect').length,
     honeypots: fields.length - nonTrap.length,
+    overflow,
   };
 
   return { fields, coverage, subject, body, values };

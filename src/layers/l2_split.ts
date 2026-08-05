@@ -54,8 +54,23 @@ function tokens(f: DetectedField): string[] {
 const SEI_TOK = new Set(['sei', 'lastname', 'lname', 'familyname', 'surname', 'myoji', 'myouji', 'family', 'last']);
 const MEI_TOK = new Set(['mei', 'firstname', 'fname', 'givenname', 'given', 'first']);
 
+/** Reading-field markers that get glued onto a sei/mei token. */
+const KANA_AFFIX = /^(?:kana|furigana|katakana|hiragana|ruby|yomi|yomigana|kn)|(?:kana|furigana|katakana|hiragana|ruby|yomi|yomigana|kn)$/;
+
+/**
+ * Strip a reading marker glued to a sei/mei token so the halves are still
+ * recognised: `lastKana` -> `last`, `kanaSei` -> `sei`, `firstNameKana` ->
+ * `firstname`. Without this, yokowo's form_lastKana/form_firstKana tokenize as
+ * one opaque word, the pair is never seen as a split, and the whole reading is
+ * jammed into セイ while メイ stays empty.
+ */
+function stripKanaAffix(tok: string): string {
+  const stripped = tok.replace(KANA_AFFIX, '');
+  return stripped || tok;
+}
+
 function isKanaField(f: DetectedField): boolean {
-  return /フリガナ|ふりがな|カナ|かな|kana|furigana|katakana|ﾌﾘｶﾞﾅ|ヨミ|よみ|読み|振り仮名|振仮名/.test(hay(f));
+  return /フリガナ|ふりがな|カナ|かな|kana|furigana|katakana|ﾌﾘｶﾞﾅ|ヨミ|よみ|読み|振り仮名|振仮名|ruby|yomi/.test(hay(f));
 }
 function raw(s: string | null): string {
   return (s || '').trim();
@@ -72,11 +87,123 @@ function isNameLabel(s: string): boolean {
   return /氏名|お名前|ご芳名|name/i.test(s) && !/会社|企業|法人|団体|部署/.test(s);
 }
 
+/* ----------------------- 住所分割 (都道府県/市区町村/番地) ----------------------- */
+
+/** Anything that makes a control part of the address block. */
+const ADDRESS_HINT =
+  /住所|所在地|address|addr|都道府県|市区町村|市町村|番地|丁目|建物|マンション|ビル|アパート|street|city|pref|todofuken|banchi/i;
+/** Postal boxes live inside the 住所 block but belong to the postal roles. */
+const POSTAL_HINT = /郵便|〒|zip|postal|postcode|yubin|yuubin/i;
+/** 番地・建物名 — tested BEFORE city because 「市区町村以降」 contains 市区町村. */
+const STREET_HINT = /番地|丁目|建物|マンション|ビル|アパート|部屋|号室|以降|street|banchi/i;
+const PREF_HINT = /都道府県|prefecture|todofuken|(?:^|[^a-z])pref(?:[^a-z]|$)/i;
+const CITY_HINT = /市区町村|市町村|区市町村|city|shikuchoson/i;
+/** A box that only asks for a building name — we have none, so never fill it. */
+const BUILDING_ONLY = /建物|マンション|ビル|アパート|部屋|号室|棟/;
+/** Evidence the box is a real address part, not just a 建物名 box. Note that a
+ * 建物 word often appears inside an example ("市区町村以降 (例：□□町1-1-1 △△ビル)"). */
+const ADDRESS_PART_MARK = /住所|所在地|番地|丁目|以降|都道府県|市区町村|市町村|street|address/i;
+
+type AddrKind = 'pref' | 'city' | 'street' | null;
+
+/** True when a <select>'s options are a Japanese prefecture list. */
+function looksLikePrefectureSelect(f: DetectedField): boolean {
+  const opts = f.options ?? [];
+  return opts.some((o) => o.includes('北海道')) && opts.some((o) => /東京都|大阪府/.test(o));
+}
+
+/**
+ * Detect a 住所 split (genma: 都道府県+市区町村+番地・マンション名など, yokowo:
+ * 都道府県<select>+市区町村+市区町村以降, lassic: streetaddress01/02/03).
+ *
+ * A single 住所 box is NOT a split — it keeps the generic `address` role and the
+ * whole address goes in. With two or more boxes each part is claimed by explicit
+ * label/name evidence (都道府県 / 市区町村 / 番地) and anything unmarked is filled
+ * positionally from 市区町村 → 番地. 都道府県 is only ever assigned on explicit
+ * evidence: a generic 住所 box must not be mistaken for a prefecture picker.
+ */
+function detectAddressParts(
+  fields: DetectedField[],
+  consumed: Set<number>,
+): { cands: Cand[]; extra: number[] } {
+  const found: { idx: number; kind: AddrKind; conf: number }[] = [];
+
+  fields.forEach((f, idx) => {
+    if (consumed.has(idx) || f.honeypot) return;
+    const isSelect = f.tag === 'select';
+    if (!isFillableText(f) && !isSelect) return;
+    if ((f.type || '').toLowerCase() === 'email') return;
+
+    const h = hay(f);
+    const prefSelect = isSelect && looksLikePrefectureSelect(f);
+    if (!ADDRESS_HINT.test(h) && !prefSelect) return;
+
+    let kind: AddrKind = null;
+    if (prefSelect || PREF_HINT.test(h)) kind = 'pref';
+    else if (isSelect) return; // a non-prefecture select in the 住所 block — leave to the choice pass
+    else if (STREET_HINT.test(h)) kind = 'street';
+    else if (CITY_HINT.test(h)) kind = 'city';
+
+    // 郵便番号 box sharing the 住所 label — postal roles own it.
+    if (kind !== 'pref' && POSTAL_HINT.test(h)) return;
+    // 「建物名・部屋番号」 only: we have no building name, so leave it blank rather
+    // than shoving 番地 into it. A label carrying any real address-part marker
+    // (住所/番地/以降/市区町村…) is a genuine address box, not a building box.
+    const label = raw(f.labelText);
+    if (label && BUILDING_ONLY.test(label) && !ADDRESS_PART_MARK.test(label)) return;
+
+    found.push({ idx, kind, conf: kind ? 0.88 : 0.72 });
+  });
+
+  // Not a split — the whole address goes into the one box (generic `address`).
+  if (found.length < 2) return { cands: [], extra: [] };
+
+  const out: Cand[] = [];
+  const used = new Set<FieldRole>();
+  // Roles explicitly claimed further down the list must not be stolen positionally.
+  const reserved = new Set<FieldRole>(
+    found
+      .filter((c) => c.kind && found.filter((o) => o.kind === c.kind).length === 1)
+      .map((c) => (`address_${c.kind}` as FieldRole)),
+  );
+
+  const extra: number[] = [];
+  for (const c of found) {
+    let role: FieldRole | undefined;
+    if (c.kind && reserved.has(`address_${c.kind}` as FieldRole)) {
+      role = `address_${c.kind}` as FieldRole;
+    } else {
+      // Positional fill, 市区町村 → 番地. 都道府県 needs explicit evidence.
+      role = (['address_city', 'address_street'] as FieldRole[]).find(
+        (r) => !used.has(r) && !reserved.has(r),
+      );
+    }
+    if (!role || used.has(role)) {
+      // More address boxes than parts (a 建物名 box on a 3-box form). Consume it
+      // anyway so the generic `address` rule can't claim it and paste the WHOLE
+      // address into a box that already has its 市区町村/番地 siblings filled.
+      extra.push(c.idx);
+      continue;
+    }
+    used.add(role);
+    out.push({ idx: c.idx, role, confidence: c.conf });
+  }
+  return { cands: out, extra };
+}
+
 /**
  * Detect split-field groups and return ordered sub-role mappings plus the set
  * of field indices they consumed.
  */
-export function detectSplitFields(fields: DetectedField[]): SplitResult {
+export function detectSplitFields(
+  fields: DetectedField[],
+  opts: { skip?: Set<number> } = {},
+): SplitResult {
+  const skip = opts.skip ?? new Set<number>();
+  // Fields we must never fill (off-topic form sections) are hidden from every
+  // detector below by presenting them as honeypots — the one flag all of them
+  // already respect.
+  if (skip.size) fields = fields.map((f, i) => (skip.has(i) ? { ...f, honeypot: true } : f));
   const cands: Cand[] = [];
 
   // ---------- A1. Phone parts by attribute (tel1/tel2/tel3, autocomplete) ----------
@@ -125,7 +252,7 @@ export function detectSplitFields(fields: DetectedField[]): SplitResult {
   fields.forEach((f, idx) => {
     if (!isFillableText(f)) return;
     if ((f.type || '').toLowerCase() === 'email') return;
-    const tks = tokens(f);
+    const tks = tokens(f).map(stripKanaAffix);
     const lab = raw(f.labelText);
     const ph = raw(f.placeholder);
     const seiTok = tks.some((t) => SEI_TOK.has(t));
@@ -172,6 +299,10 @@ export function detectSplitFields(fields: DetectedField[]): SplitResult {
     // Consume ONLY the confirm box; the primary email stays for the rule mapper.
     cands.push({ idx: confirm.idx, role: 'email_confirm', confidence: conf });
   }
+
+  // ---------- A5. Address parts (都道府県 / 市区町村 / 番地・マンション名) ----------
+  const addr = detectAddressParts(fields, new Set(cands.map((c) => c.idx)));
+  cands.push(...addr.cands);
 
   // ---------- B. Structural adjacency: run of same-label fillable inputs ----------
   const consumedSoFar = new Set(cands.map((c) => c.idx));
@@ -230,5 +361,6 @@ export function detectSplitFields(fields: DetectedField[]): SplitResult {
       source: 'structure',
     });
   }
+  for (const idx of addr.extra) takenField.add(idx);
   return { mappings, consumed: takenField };
 }

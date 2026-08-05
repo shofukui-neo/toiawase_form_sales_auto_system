@@ -105,6 +105,54 @@ const splitForm = page(
   </form>`,
 );
 
+/**
+ * 住所分割 + フリガナ接尾辞 + 種別チェックボックス群のフォーム。
+ * genma / yokowo / sengoku で実際に見られた形を1枚に集約したもの:
+ *   - 姓/名 と form_lastKana / form_firstKana（ラベルなし・カナ接尾辞）
+ *   - 都道府県<select> + 市区町村 + 番地・マンション名など
+ *   - 「お問い合わせ内容」を表すチェックボックス群（同意欄ではない）
+ * complete ハンドラが各欄を個別に検証するので、値が正しい欄に入ったことを証明できる。
+ */
+const addressForm = page(
+  'お問い合わせ（住所分割）',
+  `<h1>お問い合わせフォーム</h1>
+  <form method="POST" action="/address/confirm">
+    <table>
+      <tr><th><label for="company">会社名</label></th><td><input id="company" name="company" type="text" required></td></tr>
+      <tr><th>お名前</th><td>
+        <input id="form_lastName" name="form_lastName" type="text" required>
+        <input id="form_firstName" name="form_firstName" type="text" required>
+      </td></tr>
+      <tr><th>フリガナ</th><td>
+        <input id="form_lastKana" name="form_lastKana" type="text" required>
+        <input id="form_firstKana" name="form_firstKana" type="text" required>
+      </td></tr>
+      <tr><th><label for="zip1">郵便番号</label></th><td>
+        <input id="zip1" name="zip1" type="text" maxlength="3" required> -
+        <input id="zip2" name="zip2" type="text" maxlength="4" required>
+      </td></tr>
+      <tr><th><label for="pref">都道府県</label></th><td>
+        <select id="pref" name="pref" required>
+          <option value="">選択してください</option>
+          <option>北海道</option><option>東京都</option><option>大阪府</option><option>福岡県</option>
+        </select>
+      </td></tr>
+      <tr><th><label for="city">市区町村</label></th><td><input id="city" name="city" type="text" required></td></tr>
+      <tr><th><label for="banchi">番地・マンション名など</label></th><td><input id="banchi" name="banchi" type="text" required></td></tr>
+      <tr><th><label for="tel">電話番号</label></th><td><input id="tel" name="tel" type="tel" required></td></tr>
+      <tr><th><label for="email">メールアドレス</label></th><td><input id="email" name="email" type="email" required></td></tr>
+      <tr><th>お問い合わせ種別</th><td>
+        <label><input type="checkbox" name="topic" value="oem"> OEMについて</label>
+        <label><input type="checkbox" name="topic" value="media"> メディア・取材について</label>
+        <label><input type="checkbox" name="topic" value="other"> その他</label>
+      </td></tr>
+      <tr><th><label for="message">お問い合わせ内容</label></th><td><textarea id="message" name="message" required></textarea></td></tr>
+    </table>
+    <label><input type="checkbox" name="policy" required> 個人情報の取扱いに同意する</label>
+    <button type="submit">確認画面へ</button>
+  </form>`,
+);
+
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
@@ -160,6 +208,29 @@ export function startServer(port = 0): Promise<{ server: Server; url: string }> 
       }
       if (data.email !== data.email2) {
         return send(200, page('入力エラー', '<h1>入力エラー</h1><p>メールアドレスが一致しません。</p>'));
+      }
+      return send(200, page('送信完了', '<h1>送信が完了しました</h1><p>お問い合わせありがとうございました。</p>'));
+    }
+
+    if (req.method === 'GET' && url.startsWith('/address') && url !== '/address/confirm') {
+      return send(200, addressForm);
+    }
+    if (req.method === 'POST' && url === '/address/confirm') {
+      const data = await readBody(req);
+      return send(200, confirmPage(data, '/address/complete'));
+    }
+    if (req.method === 'POST' && url === '/address/complete') {
+      const data = await readBody(req);
+      const need = ['company', 'form_lastName', 'form_firstName', 'form_lastKana', 'form_firstKana',
+        'zip1', 'zip2', 'pref', 'city', 'banchi', 'tel', 'email', 'message', 'policy'];
+      const missing = need.filter((k) => !data[k] || String(data[k]).trim() === '');
+      if (missing.length > 0) {
+        return send(200, page('入力エラー', `<h1>入力エラー</h1><p>未入力の項目があります: ${escapeHtml(missing.join(', '))}</p>`));
+      }
+      // 種別は「ちょうど1つ」であること（全部チェックはボット挙動）。
+      const topics = ([] as string[]).concat(data.topic as any);
+      if (topics.length !== 1) {
+        return send(200, page('入力エラー', `<h1>入力エラー</h1><p>種別の選択数が不正です: ${topics.length}</p>`));
       }
       return send(200, page('送信完了', '<h1>送信が完了しました</h1><p>お問い合わせありがとうございました。</p>'));
     }

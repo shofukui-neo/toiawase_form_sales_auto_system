@@ -92,29 +92,12 @@ export function detectChoiceFields(
   }
 
   // ---------- required radio groups ----------
-  const groups = new Map<string, DetectedField[]>();
-  for (const f of fields) {
-    if (f.tag !== 'input' || (f.type || '').toLowerCase() !== 'radio' || !isFillable(f)) continue;
-    if (!f.name) continue;
-    const arr = groups.get(f.name) ?? [];
-    arr.push(f);
-    groups.set(f.name, arr);
-  }
-  for (const [, members] of groups) {
+  for (const [, members] of groupByName(fields, 'radio')) {
     if (members.length < 2) continue;
     if (members.some((m) => mappedSelectors.has(m.selector))) continue;
     const required = members.some((m) => m.required);
     if (!required) continue; // never touch optional radio groups (brand safety)
-    // Prefer a keyword-matched option; do NOT guess if nothing matches.
-    let chosen: DetectedField | null = null;
-    outer: for (const kw of PREFERRED) {
-      for (const m of members) {
-        if (norm(m.labelText).includes(kw)) {
-          chosen = m;
-          break outer;
-        }
-      }
-    }
+    const chosen = pickByKeyword(members);
     if (chosen) {
       mappings.push({
         role: 'choice',
@@ -128,5 +111,45 @@ export function detectChoiceFields(
     }
   }
 
+  // ---------- category checkbox groups (お問い合わせ内容 as multi-select) ----------
+  // Some forms express 種別 as a checkbox group instead of a select. Exactly ONE
+  // box is ticked, and only on a keyword match — ticking several (or guessing
+  // 「メディア・取材について」) misrepresents why we are writing.
+  for (const [, members] of groupByName(fields, 'checkbox')) {
+    if (members.length < 2) continue;
+    if (members.some((m) => mappedSelectors.has(m.selector))) continue;
+    const chosen = pickByKeyword(members);
+    if (!chosen) continue; // nothing safely neutral -> leave the group untouched
+    mappings.push({
+      role: 'choice',
+      selector: chosen.selector,
+      confidence: 0.7,
+      source: 'structure',
+      value: norm(chosen.labelText),
+    });
+  }
+
   return { mappings, ambiguous };
+}
+
+/** Group same-named, fillable inputs of one type (radio / checkbox). */
+function groupByName(fields: DetectedField[], type: string): Map<string, DetectedField[]> {
+  const groups = new Map<string, DetectedField[]>();
+  for (const f of fields) {
+    if (f.tag !== 'input' || (f.type || '').toLowerCase() !== type || !isFillable(f)) continue;
+    if (!f.name) continue;
+    const arr = groups.get(f.name) ?? [];
+    arr.push(f);
+    groups.set(f.name, arr);
+  }
+  return groups;
+}
+
+/** The first member whose label contains a PREFERRED keyword, else null (never guess). */
+function pickByKeyword(members: DetectedField[]): DetectedField | null {
+  for (const kw of PREFERRED) {
+    const hit = members.find((m) => norm(m.labelText).includes(kw));
+    if (hit) return hit;
+  }
+  return null;
 }

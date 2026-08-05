@@ -68,13 +68,19 @@ export function computeGate(input: GateInput): GateResult {
   // (§4-L2 ④), so a legitimate form's honeypot is neutralized, not risky. Only
   // things we cannot safely get past (CAPTCHA) or must not send to (no-sales
   // policy) force the manual queue.
+  // reCAPTCHA v2 / hCaptcha show an interactive challenge we cannot solve -> block.
+  // v3 is invisible and score-based: nothing to click, the submit usually goes
+  // through, and L5 judges the outcome. So it is not a blocker — but it never
+  // auto-sends either; the gate is capped at 'mid' so a human approves each one.
   const blockers: string[] = [];
-  if (schema.hasCaptcha !== 'none') blockers.push(`captcha:${schema.hasCaptcha}`);
+  if (schema.hasCaptcha === 'v2') blockers.push('captcha:v2');
   if (schema.noSalesPolicy) blockers.push('no-sales-policy');
   if (schema.hasHoneypot) reasons.push('honeypot-present-neutralized');
   if (blockers.length > 0) {
     return { gate: 'block', mappingConfidence, reasons: [...blockers, ...reasons] };
   }
+  const capMid = schema.hasCaptcha === 'v3';
+  if (capMid) reasons.push('captcha:v3-invisible-needs-approval');
 
   // ---- Missing a required role we can't fabricate -> low ----
   if (missingRequired.length > 0) {
@@ -90,6 +96,7 @@ export function computeGate(input: GateInput): GateResult {
       reasons.push('ambiguous-choice-needs-review');
       return { gate: 'mid', mappingConfidence, reasons };
     }
+    if (capMid) return { gate: 'mid', mappingConfidence, reasons };
     reasons.push('all-required-high-confidence');
     return { gate: 'high', mappingConfidence, reasons };
   }

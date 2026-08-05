@@ -1,17 +1,24 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { ROOT, config } from '../config.js';
+import { ROOT, config, splitAddress } from '../config.js';
 import type { CompanyRow, ContentOverride, FormSchema, RenderedContent, FieldRole } from '../types.js';
 import { contentOverrides } from '../db/repositories.js';
+import { personalize } from './l3_personalize.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L3');
 
 /**
- * L3 — content generation (spec §4-L3). Phase 1 = template + variable
- * substitution. Deterministic on purpose: the Plan and Execute phases must
- * render identical text (spec §4-L4). Compliance requires the sender identity
- * be present and truthful (§9).
+ * L3 — content generation (spec §4-L3): template + variable substitution, plus
+ * the per-role values L4 types into the form.
+ *
+ * Deterministic on purpose: the Plan and Execute phases must render identical
+ * text (spec §4-L4), so personalisation is rule-based (l3_personalize), never
+ * sampled. Compliance requires the sender identity be present and truthful (§9)
+ * — which is also why **nothing here is ever fabricated**. A value we do not
+ * genuinely have (no phone configured, no postal code) is left unset so the
+ * field shows up as an un-fillable required field and the form gates down to a
+ * human, instead of a made-up number reaching a real recipient.
  */
 
 interface ParsedTemplate {
@@ -32,6 +39,117 @@ function substitute(text: string, vars: Record<string, string>): string {
   return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => vars[k] ?? '');
 }
 
+/** `<!--optional-->…<!--/optional-->` — the part we drop to fit a maxlength. */
+const OPTIONAL_BLOCK = /[\r\n]*<!--optional-->[\s\S]*?<!--\/optional-->/g;
+
+function stripOptional(body: string): string {
+  return body.replace(OPTIONAL_BLOCK, '');
+}
+function keepOptional(body: string): string {
+  return body.replace(/<!--\/?optional-->\r?\n?/g, '');
+}
+
+/**
+ * The maxlength of the textarea the message will land in, or null.
+ *
+ * Several forms cap 本文 at 1000 (or even 200) characters and the browser then
+ * silently truncates — cutting the signature off mid-block, which would leave a
+ * message with no sender contact details at all (§9). So the shrink decision is
+ * made HERE, deterministically, rather than being discovered at type-time: the
+ * approval preview shows exactly the text that will be submitted.
+ */
+function messageLimit(schema: FormSchema | undefined): number | null {
+  const sel = schema?.mappings?.find((m) => m.role === 'message')?.selector;
+  if (!sel) return null;
+  return schema?.fields?.find((f) => f.selector === sel)?.maxLength ?? null;
+}
+
+const SIG_RULE = '■━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━■';
+
+/**
+ * Build the signature block from the configured sender identity, so the .env is
+ * the single source of truth and the block can never drift from the values we
+ * actually type into the form. Lines whose value is unset are dropped rather
+ * than left as a dangling label.
+ */
+export function buildSignature(): string {
+  const s = config.sender;
+  const lines: string[] = [SIG_RULE];
+
+  if (s.company) lines.push(s.company);
+  if (s.department) lines.push(s.department.replace(/\s+/g, '　'));
+  // 署名の氏名は姓名を詰めて表記する（フォーム入力欄は「福井 聖」のまま）。
+  const person = s.person.replace(/[\s　]+/g, '');
+  if (person) lines.push(s.personRomaji ? `${person}／${s.personRomaji}` : person);
+
+  const contact: string[] = [];
+  if (s.mobile) contact.push(`携帯電話：${s.mobile}`);
+  if (s.email) contact.push(`E-mail：${s.email}`);
+  if (contact.length) lines.push('', ...contact);
+
+  const office: string[] = [];
+  if (s.postal || s.address) office.push(`〒${s.postal} ${s.address}`.trim());
+  if (s.phone) office.push(`電話：${s.phone}`);
+  if (s.fax) office.push(`FAX ：${s.fax}`);
+  if (s.url) office.push(`URL：${s.url}`);
+  if (office.length) lines.push('', `◆${s.office || '本社'}`, ...office);
+
+  lines.push(SIG_RULE);
+  return lines.join('\n');
+}
+
+/** Which of the split 住所 boxes this form actually has. */
+export interface AddressSlots {
+  pref: boolean;
+  city: boolean;
+  street: boolean;
+}
+
+function addressSlots(schema: FormSchema | undefined): AddressSlots {
+  const roles = new Set((schema?.mappings ?? []).map((m) => m.role));
+  return {
+    pref: roles.has('address_pref'),
+    city: roles.has('address_city'),
+    street: roles.has('address_street'),
+  };
+}
+
+/**
+ * Spread 都道府県 / 市区町村 / 番地・建物名 over whichever address boxes the form
+ * has, so no component is ever dropped or duplicated: each box takes everything
+ * from just after the previous box's component through its own, and the last box
+ * absorbs the tail. 都道府県 is the exception — a prefecture picker only ever
+ * receives the prefecture.
+ *
+ * 都道府県+市区町村+番地  -> 東京都 / 新宿区 / 西新宿1丁目22-2
+ * 都道府県+番地           -> 東京都 / 新宿区西新宿1丁目22-2
+ * 市区町村+番地           -> 東京都新宿区 / 西新宿1丁目22-2
+ */
+export function deriveAddressValues(
+  address: string,
+  slots: AddressSlots,
+): Partial<Record<FieldRole, string>> {
+  const out: Partial<Record<FieldRole, string>> = {};
+  if (!address) return out;
+  const { prefecture, city, street } = splitAddress(address);
+  const comps = [prefecture, city, street];
+
+  const buckets: { role: FieldRole; pos: number }[] = [];
+  if (slots.pref) buckets.push({ role: 'address_pref', pos: 0 });
+  if (slots.city) buckets.push({ role: 'address_city', pos: 1 });
+  if (slots.street) buckets.push({ role: 'address_street', pos: 2 });
+
+  let from = 0;
+  buckets.forEach((b, i) => {
+    const isLast = i === buckets.length - 1;
+    const to = b.role === 'address_pref' ? b.pos : isLast ? comps.length - 1 : b.pos;
+    const value = comps.slice(from, to + 1).join('');
+    if (value) out[b.role] = value;
+    from = to + 1;
+  });
+  return out;
+}
+
 export interface RenderOptions {
   templateName?: string;
 }
@@ -43,48 +161,63 @@ export function renderContent(
 ): RenderedContent {
   const tpl = loadTemplate(opts.templateName ?? 'mochica_default');
   const s = config.sender;
+  const p = personalize(company);
   const vars: Record<string, string> = {
     company: company.name,
     senderCompany: s.company,
     senderProduct: s.product,
     senderPerson: s.person,
+    senderDepartment: s.department,
     senderEmail: s.email,
+    senderPhone: s.phone,
+    senderMobile: s.mobile,
+    // 「その企業である理由」— 業種推定に基づく導入文 (l3_personalize)。
+    reason: p.reason,
+    industry: p.industry,
+    signature: buildSignature(),
     // Only render a phone line if a phone is configured (avoids a dangling label).
     senderPhoneLine: s.phone ? `\nTEL：${s.phone}` : '',
   };
 
   const subject = substitute(tpl.subject, vars);
-  const body = substitute(tpl.body, vars);
+  // Fit the body to the target textarea: full text when it fits, otherwise the
+  // same text minus the `<!--optional-->` block. The signature is never dropped.
+  const limit = messageLimit(schema);
+  const full = keepOptional(substitute(tpl.body, vars));
+  let body = full;
+  if (limit && full.length > limit) {
+    body = stripOptional(substitute(tpl.body, vars));
+    log.warn(
+      `message trimmed for ${company.name}: ${full.length} -> ${body.length} chars (maxlength=${limit})`,
+    );
+  }
 
   // Compliance guard: sender company + a contact channel must appear (§9).
   if (!body.includes(s.company) || !(s.email && body.includes(s.email))) {
     log.warn('rendered body missing sender identity — check template/env sender config');
   }
 
-  // Values to type per role. We only supply what a legitimate sales inquiry needs;
-  // roles the form has but we can't truthfully fill (e.g. kana of a real person)
-  // use the configured sender identity. Values we don't truthfully have are left
-  // unset — never fabricated — so a required-but-missing field gates down to a
-  // human rather than sending a fake value.
+  // Values to type per role. Only the truthful sender identity goes in; a role we
+  // have no real value for stays unset (see the file header) so a required-but-
+  // missing field gates down to a human rather than sending a fake value.
   const [sei, mei] = splitName(s.person);
-  const email = s.email || 'contact@example.com';
-  const fallbackPhone = s.phone || '03-0000-0000';
-  const fallbackDepartment = s.department || (s.company ? '営業部' : '総務部');
   const fallbackSubject = subject || `お問い合わせ（${company.name}）`;
   const fallbackBody = body || `お世話になっております。${company.name}の採用ご担当者様へのお問い合わせです。`;
   const values: Partial<Record<FieldRole, string>> = {
     company: company.name,
-    name: s.person || '採用担当者',
-    email,
-    email_confirm: email, // メール（確認）再入力欄 (課題D)
-    phone: fallbackPhone,
-    department: fallbackDepartment,
     subject: fallbackSubject,
     message: fallbackBody,
-    postal: s.postal,
-    address: s.address,
     agree: 'on',
   };
+  if (s.person) values.name = s.person;
+  if (s.email) {
+    values.email = s.email;
+    values.email_confirm = s.email; // メール（確認）再入力欄 (課題D)
+  }
+  if (s.phone) values.phone = s.phone;
+  if (s.department) values.department = s.department;
+  if (s.postal) values.postal = s.postal;
+  if (s.address) values.address = s.address;
 
   // --- 氏名 split (課題A): 姓/名 to separate boxes ---
   if (sei) values.name_sei = sei;
@@ -100,49 +233,34 @@ export function renderContent(
     values.kana = [s.kanaSei, s.kanaMei].filter(Boolean).join(' ');
   } else if (s.kana) {
     values.kana = s.kana; // configured full kana (SENDER_KANA)
-  } else if (/^[ァ-ヶー\s　]+$/.test(s.person)) {
+  } else if (s.person && /^[ァ-ヶー\s　]+$/.test(s.person)) {
     values.kana = s.person;
     const [ks, km] = splitName(s.person);
     if (ks) values.kana_sei = ks;
     if (km) values.kana_mei = km;
   }
 
-  // --- 電話 split (課題A): 03-1234-5678 -> 3 (or 2) boxes ---
-  const phoneParts = fallbackPhone.split(/[-‐‑–—―ー－ｰ\s]+/).map((x) => x.trim()).filter(Boolean);
-  if (phoneParts.length >= 3) {
-    values.phone1 = phoneParts[0];
-    values.phone2 = phoneParts[1];
-    values.phone3 = phoneParts.slice(2).join('');
-  } else if (phoneParts.length === 2) {
-    values.phone1 = phoneParts[0];
-    values.phone2 = phoneParts[1];
-  }
+  // --- 電話 split (課題A): 03-5908-8405 -> 3 (or 2) boxes ---
+  Object.assign(values, splitPhoneValues(s.phone));
 
   // --- 郵便番号 split (課題A). Only when a truthful sender postal is configured. ---
-  if (s.postal) {
-    values.postal = s.postal;
-    const pp = s.postal.split(/[-‐‑–—―－\s]+/).map((x) => x.trim()).filter(Boolean);
-    if (pp.length >= 2) {
-      values.postal1 = pp[0];
-      values.postal2 = pp.slice(1).join('');
-    } else {
-      const digits = s.postal.replace(/[^0-9]/g, '');
-      if (digits.length === 7) {
-        values.postal1 = digits.slice(0, 3);
-        values.postal2 = digits.slice(3);
-      }
-    }
-  }
+  Object.assign(values, splitPostalValues(s.postal));
+
+  // --- 住所 split: 都道府県 / 市区町村 / 番地・マンション名 ---
+  // Distribution depends on which boxes this form has, so it is derived from the
+  // schema rather than pre-computed per role.
+  const slots = addressSlots(schema);
+  Object.assign(values, deriveAddressValues(s.address, slots));
 
   // --- Manual override layer (approval dashboard edit, §13-2) ---
   // Applied last so a human correction flows into preview, plan AND execute
-  // identically. Split sub-boxes (phone/postal/氏名/フリガナ) are re-derived from
-  // the edited base value so a corrected 電話 still fills the 3-box variant.
+  // identically. Split sub-boxes (phone/postal/氏名/フリガナ/住所) are re-derived
+  // from the edited base value so a corrected 電話 still fills the 3-box variant.
   let finalSubject = subject;
   let finalBody = body;
   const ov = loadOverrides(company.id);
   if (ov) {
-    applyValueOverrides(values, ov.values);
+    applyValueOverrides(values, ov.values, slots);
     if (ov.values.subject != null) finalSubject = ov.values.subject;
     if (ov.values.message != null) finalBody = ov.values.message;
   }
@@ -159,6 +277,24 @@ function loadOverrides(companyId: number): ContentOverride | undefined {
   }
 }
 
+/** 03-5908-8405 -> {phone1:'03', phone2:'5908', phone3:'8405'}; <2 parts -> {}. */
+function splitPhoneValues(phone: string): Partial<Record<FieldRole, string>> {
+  const parts = (phone || '').split(/[-‐‑–—―ー－ｰ\s]+/).map((x) => x.trim()).filter(Boolean);
+  if (parts.length >= 3) return { phone1: parts[0], phone2: parts[1], phone3: parts.slice(2).join('') };
+  if (parts.length === 2) return { phone1: parts[0], phone2: parts[1] };
+  return {};
+}
+
+/** 160-0023 -> {postal1:'160', postal2:'0023'}; also handles an unhyphenated 7-digit form. */
+function splitPostalValues(postal: string): Partial<Record<FieldRole, string>> {
+  if (!postal) return {};
+  const pp = postal.split(/[-‐‑–—―－\s]+/).map((x) => x.trim()).filter(Boolean);
+  if (pp.length >= 2) return { postal1: pp[0], postal2: pp.slice(1).join('') };
+  const digits = postal.replace(/[^0-9]/g, '');
+  if (digits.length === 7) return { postal1: digits.slice(0, 3), postal2: digits.slice(3) };
+  return {};
+}
+
 /**
  * Merge dashboard edits into the rendered `values`, re-deriving the split
  * sub-fields for the base roles that have them. Only keys present in `edits`
@@ -167,11 +303,11 @@ function loadOverrides(companyId: number): ContentOverride | undefined {
 export function applyValueOverrides(
   values: Partial<Record<FieldRole, string>>,
   edits: Partial<Record<FieldRole, string>>,
+  slots: AddressSlots = { pref: false, city: false, street: false },
 ): void {
   const setBase = (role: FieldRole) => edits[role] != null;
 
   if (setBase('company')) values.company = edits.company!;
-  if (setBase('address')) values.address = edits.address!;
   if (setBase('department')) values.department = edits.department!;
   if (setBase('subject')) values.subject = edits.subject!;
   if (setBase('message')) values.message = edits.message!;
@@ -198,31 +334,19 @@ export function applyValueOverrides(
   if (setBase('phone')) {
     values.phone = edits.phone!;
     delete values.phone1; delete values.phone2; delete values.phone3;
-    const pp = edits.phone!.split(/[-‐‑–—―ー－ｰ\s]+/).map((x) => x.trim()).filter(Boolean);
-    if (pp.length >= 3) {
-      values.phone1 = pp[0];
-      values.phone2 = pp[1];
-      values.phone3 = pp.slice(2).join('');
-    } else if (pp.length === 2) {
-      values.phone1 = pp[0];
-      values.phone2 = pp[1];
-    }
+    Object.assign(values, splitPhoneValues(edits.phone!));
   }
 
   if (setBase('postal')) {
     values.postal = edits.postal!;
     delete values.postal1; delete values.postal2;
-    const pp = edits.postal!.split(/[-‐‑–—―－\s]+/).map((x) => x.trim()).filter(Boolean);
-    if (pp.length >= 2) {
-      values.postal1 = pp[0];
-      values.postal2 = pp.slice(1).join('');
-    } else {
-      const digits = edits.postal!.replace(/[^0-9]/g, '');
-      if (digits.length === 7) {
-        values.postal1 = digits.slice(0, 3);
-        values.postal2 = digits.slice(3);
-      }
-    }
+    Object.assign(values, splitPostalValues(edits.postal!));
+  }
+
+  if (setBase('address')) {
+    values.address = edits.address!;
+    delete values.address_pref; delete values.address_city; delete values.address_street;
+    Object.assign(values, deriveAddressValues(edits.address!, slots));
   }
 }
 

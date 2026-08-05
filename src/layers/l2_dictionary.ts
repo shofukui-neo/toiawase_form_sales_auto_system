@@ -1,10 +1,34 @@
-import type { FieldRole } from '../types.js';
+import type { DetectedField, FieldRole } from '../types.js';
 
 /**
  * L2 rule-based dictionary (spec §4-L2 ①). Each role has keyword patterns
  * matched against label / name / id / placeholder. Order matters: more specific
  * roles (kana, email) should win over generic ones (name), so we score matches.
  */
+
+/**
+ * Fields belonging to a form that is not a sales-inquiry form at all — spam
+ * reports, complaints, cancellations, fraud reports.
+ *
+ * These forms carry a 【入力者情報】 block that looks exactly like a normal
+ * contact form (会社名 / お名前 / 電話番号 / メールアドレス / お問い合わせ内容),
+ * so the generic mapper happily fills it and then jams the sales subject into
+ * 「迷惑メールの件名」 and the pitch into 「迷惑メールの本文」 — a report *of
+ * ourselves* as a spammer, filed with the recipient. Never map these fields, and
+ * treat their presence as grounds to drop the whole form (see eligibility.ts).
+ */
+export const OFF_TOPIC_FIELD_RE =
+  /迷惑メール|迷惑行為|スパム|spam|なりすまし|フィッシング|phishing|配信停止|配信元|通報|苦情|クレーム|リコール|返品|解約|退会|不正利用|不正アクセス/i;
+
+/** Indices of fields that must never receive a value (off-topic form sections). */
+export function offTopicFieldIndices(fields: DetectedField[]): Set<number> {
+  const out = new Set<number>();
+  fields.forEach((f, idx) => {
+    const hay = [f.labelText, f.placeholder, f.name, f.id].filter(Boolean).join(' ');
+    if (OFF_TOPIC_FIELD_RE.test(hay)) out.add(idx);
+  });
+  return out;
+}
 export interface RoleRule {
   role: FieldRole;
   /** Keywords (substring, case-insensitive). */
@@ -128,9 +152,15 @@ export const ROLE_RULES: RoleRule[] = [
     weight: 0.85,
   },
   {
+    // NOTE: no `types: ['checkbox']` here on purpose. A bare type match made every
+    // checkbox an "agree" — on a form whose お問い合わせ内容 is a 5-box category
+    // group (OEMについて / 部品事業について / …) all five got ticked at once, which
+    // is both wrong and unmistakably bot-like. Consent must be named, not guessed.
     role: 'agree',
-    keywords: ['同意', 'プライバシー', '個人情報', 'agree', '承諾', 'privacy', '規約'],
-    types: ['checkbox'],
+    keywords: [
+      '同意', '承諾', '承認', 'プライバシー', '個人情報', '規約', '取り扱いについて',
+      'agree', 'privacy', 'policy', 'consent', 'acceptance', 'accept', 'kiyaku', 'doui',
+    ],
     weight: 0.8,
   },
 ];

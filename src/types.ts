@@ -44,9 +44,10 @@ export type FieldRole =
   | 'department' // 部署/役職
   | 'subject' // 件名
   | 'message' // 本文
-  | 'email_confirm' // メールアドレス（確認用）
-  | 'postal' // 郵便番号
-  | 'address' // 住所/所在地
+  | 'address' // 住所/所在地（1欄）
+  | 'address_pref' // 住所 都道府県（分割）
+  | 'address_city' // 住所 市区町村（分割）
+  | 'address_street' // 住所 番地・マンション名など（分割）
   | 'agree' // 同意 (checkbox)
   | 'choice' // 必須の select / radio（種別など）を自動選択 (課題C)
   | 'unknown';
@@ -66,6 +67,9 @@ export const SPLIT_TO_BASE: Partial<Record<FieldRole, FieldRole>> = {
   postal1: 'postal',
   postal2: 'postal',
   email_confirm: 'email',
+  address_pref: 'address',
+  address_city: 'address',
+  address_street: 'address',
 };
 
 export type CaptchaKind = 'none' | 'v2' | 'v3';

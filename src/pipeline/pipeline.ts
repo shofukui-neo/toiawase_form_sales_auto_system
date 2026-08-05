@@ -1,4 +1,4 @@
-import type { CompanyRow } from '../types.js';
+import type { CompanyRow, CompanyStatus } from '../types.js';
 import { companies, fieldMaps, submissions, suppression, audit } from '../db/repositories.js';
 import { transition } from '../core/stateMachine.js';
 import { discoverForm } from '../layers/l1_discovery.js';
@@ -70,6 +70,80 @@ export async function discoverAndParse(companyId: number): Promise<void> {
       transition(company.id, 'PARSE_FAILED', { detail: (e as Error).message });
       audit.log({ companyId: company.id, layer: 'L2', action: 'parse_failed', detail: (e as Error).message });
     }
+  }
+}
+
+/**
+ * States a re-parse may reset. Anything already sent (or being sent) is excluded
+ * — re-parsing must never create a path to contacting a company twice (§9).
+ */
+const REPARSABLE = new Set<CompanyStatus>([
+  'FORM_FOUND', 'PARSED', 'PARSE_FAILED', 'PLAN_READY',
+  'PENDING_APPROVAL', 'REJECTED', 'NEEDS_REVIEW', 'CAPTCHA_BLOCKED',
+]);
+
+/** Suppressions a re-parse is allowed to lift: only ones the parser itself decided. */
+const PARSER_SUPPRESSIONS = new Set(['ineligible_form']);
+
+export interface ReparseResult {
+  reparsed: number;
+  skipped: number;
+  failed: number;
+  unsuppressed: number;
+}
+
+/**
+ * Re-run L2 on companies whose form was already parsed, replacing the stored
+ * field map with one produced by the current mapper.
+ *
+ * Field maps are persisted, so improvements to L2 (new split roles, a new
+ * exclusion) reach only *newly* discovered companies — everything already in the
+ * queue keeps its old, wrong mapping until it is re-parsed. This is the migration
+ * step after changing L2. Companies suppressed by the parser's own eligibility
+ * verdict are re-admitted (that verdict may have changed); compliance
+ * suppressions (already_sent / opt_out / competitor / no_sales_policy) are never
+ * touched.
+ */
+export async function reparse(
+  companyId: number,
+  opts: { includeSuppressed?: boolean } = {},
+): Promise<'reparsed' | 'skipped' | 'failed'> {
+  let company = companies.byId(companyId);
+  if (!company?.form_url) return 'skipped';
+  const formUrl = company.form_url;
+
+  if (company.status === 'SUPPRESSED') {
+    if (!opts.includeSuppressed) return 'skipped';
+    const hit = suppression.has(company.domain);
+    // Only lift a suppression the parser itself decided; never a compliance one.
+    if (hit && !PARSER_SUPPRESSIONS.has(hit.reason)) return 'skipped';
+    if (hit) suppression.remove(company.domain);
+    transition(company.id, 'PARSED', { force: true, detail: 'reparse: re-admitted' });
+    company = companies.byId(companyId)!;
+  } else if (!REPARSABLE.has(company.status)) {
+    return 'skipped';
+  }
+
+  try {
+    const schema = await parseForm({
+      formUrl,
+      formConfidence: company.form_confidence ?? 0.5,
+    });
+    if (schema.noSalesPolicy) {
+      suppression.add(company.domain, 'no_sales_policy');
+      transition(company.id, 'SUPPRESSED', { force: true, detail: 'no_sales_policy' });
+      audit.log({ companyId: company.id, layer: 'L2', action: 'suppress:no_sales_policy' });
+      return 'reparsed';
+    }
+    fieldMaps.save(company.id, schema);
+    // Back to PARSED so `plan` regenerates the preview from the new mapping.
+    transition(company.id, 'PARSED', { force: true, detail: `reparse gate=${schema.gate}` });
+    audit.log({ companyId: company.id, layer: 'L2', action: 'reparse', detail: `gate=${schema.gate}` });
+    return 'reparsed';
+  } catch (e) {
+    audit.log({ companyId: company.id, layer: 'L2', action: 'reparse_failed', detail: (e as Error).message });
+    log.error(`reparse company=${companyId}: ${(e as Error).message}`);
+    return 'failed';
   }
 }
 

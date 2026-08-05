@@ -22,7 +22,7 @@ const EDITABLE_ROLES: { role: FieldRole; label: string; multiline?: boolean }[] 
   { role: 'email', label: 'メールアドレス' },
   { role: 'phone', label: '電話番号' },
   { role: 'postal', label: '郵便番号' },
-  { role: 'address', label: '住所' },
+  { role: 'address', label: '住所（都道府県／市区町村／番地に自動分割）' },
   { role: 'department', label: '部署・役職' },
   { role: 'subject', label: '件名' },
   { role: 'message', label: '本文', multiline: true },

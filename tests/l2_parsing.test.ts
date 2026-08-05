@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ruleMap } from '../src/layers/l2_parsing.js';
+import { ruleMap, mapFields } from '../src/layers/l2_parsing.js';
 import { detectSplitFields } from '../src/layers/l2_split.js';
 import { detectChoiceFields, pickOption } from '../src/layers/l2_choice.js';
-import { renderContent } from '../src/layers/l3_content.js';
-import { config } from '../src/config.js';
-import type { DetectedField, CompanyRow, FormSchema } from '../src/types.js';
+import { renderContent, deriveAddressValues, buildSignature } from '../src/layers/l3_content.js';
+import { personalize } from '../src/layers/l3_personalize.js';
+import { config, splitAddress } from '../src/config.js';
+import type { DetectedField, CompanyRow, FormSchema, FieldRole } from '../src/types.js';
 
 let seq = 0;
 function field(overrides: Partial<DetectedField>): DetectedField {
@@ -77,42 +78,17 @@ test('maps common Japanese inquiry labels including a bare 問い合わせ field
   assert.deepEqual(roles.includes('message'), true);
 });
 
-test('renders non-empty fallback values for phone and department', () => {
+test('never fabricates an identity value: unset phone/department stay unset', () => {
   const previous = { ...config.sender };
-  config.sender.person = '福井 翔';
-  config.sender.email = 'sho.fukui@example.com';
-  config.sender.phone = '';
+  config.sender = { ...config.sender, person: '福井 聖', email: 'sho.fukui@example.com', phone: '', department: '' };
 
-  const company: CompanyRow = {
-    id: 1,
-    name: 'テスト株式会社',
-    domain: 'example.com',
-    icp_score: 0.8,
-    source: 'test',
-    status: 'NEW',
-    form_url: null,
-    form_confidence: null,
-    created_at: '',
-    updated_at: '',
-  };
-  const schema: FormSchema = {
-    formUrl: 'https://example.com/form',
-    formSelector: 'form',
-    fields: [],
-    mappings: [],
-    hasConfirmScreen: false,
-    hasCaptcha: 'none',
-    hasHoneypot: false,
-    noSalesPolicy: false,
-    ambiguousChoice: false,
-    mappingConfidence: 0.9,
-    gate: 'high',
-  };
+  const content = renderContent(mkCompany(), mkSchema());
 
-  const content = renderContent(company, schema);
-
-  assert.match(content.values.phone ?? '', /.+/);
-  assert.match(content.values.department ?? '', /.+/);
+  // A made-up 03-0000-0000 reaching a real recipient is worse than a blank
+  // required field, which gates the form down to a human instead.
+  assert.equal(content.values.phone, undefined);
+  assert.equal(content.values.department, undefined);
+  // Subject/body are template output, not identity claims — always present.
   assert.match(content.values.subject ?? '', /.+/);
   assert.match(content.values.message ?? '', /.+/);
 
@@ -282,8 +258,8 @@ test('render: phone/name/kana/postal split values + email_confirm', () => {
   const previous = { ...config.sender };
   config.sender = {
     ...config.sender,
-    company: 'ネオキャリア株式会社',
-    person: '福井 翔',
+    company: '株式会社ネオキャリア',
+    person: '福井 聖',
     email: 'sho.fukui@example.com',
     phone: '03-1234-5678',
     kanaSei: 'フクイ',
@@ -296,11 +272,273 @@ test('render: phone/name/kana/postal split values + email_confirm', () => {
   assert.equal(content.values.phone2, '1234');
   assert.equal(content.values.phone3, '5678');
   assert.equal(content.values.name_sei, '福井');
-  assert.equal(content.values.name_mei, '翔');
+  assert.equal(content.values.name_mei, '聖');
   assert.equal(content.values.kana_sei, 'フクイ');
   assert.equal(content.values.kana_mei, 'ショウ');
   assert.equal(content.values.postal1, '150');
   assert.equal(content.values.postal2, '0043');
   assert.equal(content.values.email_confirm, content.values.email);
+  config.sender = previous;
+});
+
+/* ------------------- フリガナ split: セイ/メイ (課題B) ------------------- */
+
+test('split: form_lastKana / form_firstKana -> kana_sei / kana_mei', () => {
+  // yokowo.co.jp — the reading marker is glued to the sei/mei token and the
+  // fields carry no label at all. Before, the whole reading went into セイ.
+  const r = splitRoles([
+    field({ name: 'form_lastName', selector: '#ln' }),
+    field({ name: 'form_firstName', selector: '#fn' }),
+    field({ name: 'form_lastKana', selector: '#lk' }),
+    field({ name: 'form_firstKana', selector: '#fk' }),
+  ]);
+  assert.equal(r.name_sei, '#ln');
+  assert.equal(r.name_mei, '#fn');
+  assert.equal(r.kana_sei, '#lk');
+  assert.equal(r.kana_mei, '#fk');
+});
+
+test('split: セイ/メイ labels -> kana_sei/kana_mei, 姓/名 -> name_sei/name_mei', () => {
+  // genma.co.jp shape.
+  const r = splitRoles([
+    field({ name: 'name-sei', labelText: '姓', selector: '#ns' }),
+    field({ name: 'name-mei', labelText: '名', selector: '#nm' }),
+    field({ name: 'ruby-sei', labelText: 'セイ', selector: '#ks' }),
+    field({ name: 'ruby-mei', labelText: 'メイ', selector: '#km' }),
+  ]);
+  assert.equal(r.name_sei, '#ns');
+  assert.equal(r.name_mei, '#nm');
+  assert.equal(r.kana_sei, '#ks');
+  assert.equal(r.kana_mei, '#km');
+});
+
+/* ------------------------- 住所分割 (都道府県/市区町村/番地) ------------------------- */
+
+test('splitAddress: 都道府県 / 市区町村 / 番地', () => {
+  assert.deepEqual(splitAddress('東京都新宿区西新宿1丁目22-2'), {
+    prefecture: '東京都', city: '新宿区', street: '西新宿1丁目22-2',
+  });
+  assert.deepEqual(splitAddress('神奈川県横浜市青葉区あざみ野1-2-3'), {
+    prefecture: '神奈川県', city: '横浜市青葉区', street: 'あざみ野1-2-3',
+  });
+  assert.deepEqual(splitAddress(''), { prefecture: '', city: '', street: '' });
+});
+
+test('address split: 都道府県+市区町村+番地・マンション名 (genma)', () => {
+  const r = splitRoles([
+    field({ name: 'add01', labelText: '都道府県', selector: '#a1' }),
+    field({ name: 'add02', labelText: '市区町村', selector: '#a2' }),
+    field({ name: 'add03', labelText: '番地・マンション名など', selector: '#a3' }),
+  ]);
+  assert.equal(r.address_pref, '#a1');
+  assert.equal(r.address_city, '#a2');
+  assert.equal(r.address_street, '#a3');
+});
+
+test('address split: 都道府県<select> + 市区町村 + 市区町村以降 (yokowo)', () => {
+  // 「市区町村以降」 contains 市区町村 — it must still be recognised as 番地.
+  const r = splitRoles([
+    field({ tag: 'select', type: null, name: 'form_prefectures', labelText: '都道府県', selector: '#p',
+      options: ['選択してください', '北海道', '東京都', '大阪府'] }),
+    field({ name: 'form_address1', labelText: '市区町村 (例：千代田区)', selector: '#c' }),
+    field({ name: 'form_address2', labelText: '市区町村以降 (例：□□町1-1-1 △△ビル 10F)', selector: '#s' }),
+  ]);
+  assert.equal(r.address_pref, '#p');
+  assert.equal(r.address_city, '#c');
+  assert.equal(r.address_street, '#s');
+});
+
+test('address split: a single 住所 box is not a split', () => {
+  const { mappings } = detectSplitFields([
+    field({ name: 'address', labelText: 'ご住所' }),
+    field({ name: 'company', labelText: '会社名' }),
+  ]);
+  assert.equal(mappings.filter((m) => m.role.startsWith('address')).length, 0);
+});
+
+test('address split: 郵便番号 sharing the 住所 label stays with the postal role', () => {
+  const r = splitRoles([
+    field({ name: 'your-postalcode', labelText: 'ご住所', selector: '#zip' }),
+    field({ name: 'your-pref', labelText: 'ご住所', selector: '#p', tag: 'select', type: null,
+      options: ['北海道', '東京都', '大阪府'] }),
+    field({ name: 'your-streetaddress01', labelText: 'ご住所', selector: '#s1' }),
+  ]);
+  assert.notEqual(r.address_pref, '#zip');
+  assert.notEqual(r.address_city, '#zip');
+  assert.notEqual(r.address_street, '#zip');
+  assert.equal(r.address_pref, '#p');
+});
+
+test('address split: an extra box is consumed so `address` cannot paste the whole address', () => {
+  // lassic.co.jp — streetaddress01/02/03 under one ご住所 label. Two get parts;
+  // the third must NOT fall through to the generic `address` rule.
+  const fields = [
+    field({ name: 'your-pref', labelText: 'ご住所', selector: '#p', tag: 'select', type: null,
+      options: ['北海道', '東京都', '大阪府'] }),
+    field({ name: 'your-streetaddress01', labelText: 'ご住所', selector: '#s1' }),
+    field({ name: 'your-streetaddress02', labelText: 'ご住所', selector: '#s2' }),
+    field({ name: 'your-streetaddress03', labelText: 'ご住所', selector: '#s3' }),
+  ];
+  const split = detectSplitFields(fields);
+  const { mappings } = ruleMap(fields, { skip: split.consumed });
+  assert.equal(mappings.some((m) => m.role === 'address'), false);
+});
+
+test('deriveAddressValues: every component lands somewhere, exactly once', () => {
+  const addr = '東京都新宿区西新宿1丁目22-2';
+  const all = deriveAddressValues(addr, { pref: true, city: true, street: true });
+  assert.deepEqual(all, { address_pref: '東京都', address_city: '新宿区', address_street: '西新宿1丁目22-2' });
+
+  // No 市区町村 box: 番地 absorbs it (sengoku / hattoris shape).
+  assert.deepEqual(deriveAddressValues(addr, { pref: true, city: false, street: true }), {
+    address_pref: '東京都', address_street: '新宿区西新宿1丁目22-2',
+  });
+  // No 都道府県 box: 市区町村 absorbs it.
+  assert.deepEqual(deriveAddressValues(addr, { pref: false, city: true, street: true }), {
+    address_city: '東京都新宿区', address_street: '西新宿1丁目22-2',
+  });
+  // 都道府県 never receives more than the prefecture (it is usually a <select>).
+  assert.deepEqual(deriveAddressValues(addr, { pref: true, city: true, street: false }), {
+    address_pref: '東京都', address_city: '新宿区西新宿1丁目22-2',
+  });
+});
+
+/* --------------- 非営業フォーム（迷惑メール通報など）の保護 --------------- */
+
+test('off-topic: 迷惑メール report fields are never mapped', () => {
+  // arara.com/contact/arara-form-spam — a 【入力者情報】 block that looks like a
+  // normal contact form, plus a 【迷惑メールの内容】 block. Filling the latter
+  // files a spam report against ourselves.
+  const fields = [
+    field({ name: 'v311', labelText: '【入力者情報】会社名', required: true }),
+    field({ name: 'v314', type: 'email', labelText: '【入力者情報】メールアドレス', required: true }),
+    field({ tag: 'textarea', type: null, name: 'v315', labelText: '【入力者情報】お問い合わせ内容', required: true }),
+    field({ name: 'v316', type: 'email', labelText: '【迷惑メールの内容】配信停止希望メールアドレス', required: true }),
+    field({ tag: 'textarea', type: null, name: 'v317', labelText: '【迷惑メールの内容】迷惑メールの件名', required: true }),
+    field({ tag: 'textarea', type: null, name: 'v318', labelText: '【迷惑メールの内容】迷惑メールの本文', required: true }),
+    field({ tag: 'textarea', type: null, name: 'v320', labelText: '【迷惑メールの内容】配信元企業・団体名', required: true }),
+  ];
+  const { mappings, offTopic } = mapFields(fields);
+  assert.equal(offTopic.size, 4);
+
+  const mappedLabels = mappings.map(
+    (m) => fields.find((f) => f.selector === m.selector)?.labelText ?? '',
+  );
+  for (const label of mappedLabels) assert.equal(/迷惑メール/.test(label), false, `mapped ${label}`);
+  // The legitimate 【入力者情報】 half still maps normally.
+  assert.equal(mappings.some((m) => m.role === 'message'), true);
+  assert.equal(mappings.some((m) => m.role === 'company'), true);
+});
+
+/* ---------------------- consent vs. category checkboxes ---------------------- */
+
+test('agree: a category checkbox group is not consent, and only one box is ticked', () => {
+  // sengokujp.co.jp — お問い合わせ内容 as 5 checkboxes. Ticking all five (which a
+  // bare type=checkbox match did) is both wrong and obviously automated.
+  const fields = [
+    field({ type: 'checkbox', name: 'checkBox_inp[data][]', labelText: 'OEMについて', selector: '#c1' }),
+    field({ type: 'checkbox', name: 'checkBox_inp[data][]', labelText: '部品事業について', selector: '#c2' }),
+    field({ type: 'checkbox', name: 'checkBox_inp[data][]', labelText: 'メディア・取材について', selector: '#c3' }),
+    field({ type: 'checkbox', name: 'checkBox_inp[data][]', labelText: 'その他', selector: '#c4' }),
+    field({ type: 'checkbox', name: '個人情報保護方針[data][]', labelText: '', selector: '#privacy' }),
+  ];
+  const { mappings } = mapFields(fields);
+  const agree = mappings.filter((m) => m.role === 'agree');
+  assert.deepEqual(agree.map((m) => m.selector), ['#privacy']);
+
+  const choice = mappings.filter((m) => m.role === 'choice');
+  assert.equal(choice.length, 1);
+  assert.equal(choice[0].selector, '#c4'); // 「その他」 — the neutral option
+});
+
+test('agree: consent checkboxes are still recognised by name alone', () => {
+  for (const name of ['policy', 'acceptance-442', 'your-acceptance']) {
+    const { mappings } = mapFields([field({ type: 'checkbox', name, labelText: '', selector: '#a' })]);
+    assert.equal(mappings.some((m) => m.role === 'agree'), true, `${name} should map to agree`);
+  }
+});
+
+/* ------------------------------ 文面・署名 ------------------------------ */
+
+test('signature: built from the configured identity, no dangling labels', () => {
+  const previous = { ...config.sender };
+  config.sender = {
+    ...config.sender,
+    company: '株式会社ネオキャリア', department: '事業開発本部 事業開発部',
+    person: '福井 聖', personRomaji: 'Sho Fukui', email: 'sho.fukui@neo-career.co.jp',
+    phone: '03-5908-8405', mobile: '080-6813-0780', fax: '03-5908-8158',
+    url: 'http://www.neo-career.co.jp', postal: '160-0023',
+    address: '東京都新宿区西新宿1丁目22-2', office: '新宿本社',
+  };
+  const sig = buildSignature();
+  assert.match(sig, /株式会社ネオキャリア/);
+  assert.match(sig, /事業開発本部　事業開発部/);
+  assert.match(sig, /福井聖／Sho Fukui/); // 署名では姓名を詰める
+  assert.match(sig, /携帯電話：080-6813-0780/);
+  assert.match(sig, /〒160-0023 東京都新宿区西新宿1丁目22-2/);
+  assert.match(sig, /電話：03-5908-8405/);
+  assert.match(sig, /FAX ：03-5908-8158/);
+
+  // An unset field drops its whole line rather than printing "FAX ：".
+  config.sender = { ...config.sender, fax: '', url: '' };
+  const noFax = buildSignature();
+  assert.equal(/FAX/.test(noFax), false);
+  assert.equal(/URL/.test(noFax), false);
+
+  config.sender = previous;
+});
+
+test('personalize: industry-specific reason, generic when unknown', () => {
+  const logistics = personalize({ ...mkCompany(), name: '福山通運株式会社', domain: 'fukutsu.co.jp' });
+  assert.equal(logistics.industry, '運輸・物流');
+  assert.match(logistics.reason, /運輸・物流/);
+  assert.match(logistics.reason, /福山通運株式会社/);
+
+  const unknown = personalize({ ...mkCompany(), name: 'あいうえお', domain: 'aiueo.example' });
+  assert.equal(unknown.industry, '');
+  assert.match(unknown.reason, /あいうえお/);
+  // Never asserts a fact about a company we know nothing about.
+  assert.equal(/分野で/.test(unknown.reason), false);
+});
+
+test('render: body carries the personalised reason and the full signature', () => {
+  const previous = { ...config.sender };
+  config.sender = {
+    ...config.sender,
+    company: '株式会社ネオキャリア', person: '福井 聖', personRomaji: 'Sho Fukui',
+    email: 'sho.fukui@neo-career.co.jp', phone: '03-5908-8405', mobile: '080-6813-0780',
+    department: '事業開発本部 事業開発部', postal: '160-0023',
+    address: '東京都新宿区西新宿1丁目22-2', office: '新宿本社',
+  };
+  const content = renderContent({ ...mkCompany(), name: '福山通運株式会社', domain: 'fukutsu.co.jp' }, mkSchema());
+  assert.match(content.body, /運輸・物流/);
+  assert.match(content.body, /■━/);
+  assert.match(content.body, /sho\.fukui@neo-career\.co\.jp/);
+  assert.equal(content.body.includes('ネオキャリア株式会社'), false); // 旧社名が残っていない
+  config.sender = previous;
+});
+
+test('render: body is shrunk to fit a maxlength, keeping the signature', () => {
+  const previous = { ...config.sender };
+  config.sender = {
+    ...config.sender,
+    company: '株式会社ネオキャリア', person: '福井 聖', email: 'sho.fukui@neo-career.co.jp',
+    phone: '03-5908-8405', mobile: '080-6813-0780', department: '事業開発本部 事業開発部',
+    postal: '160-0023', address: '東京都新宿区西新宿1丁目22-2', office: '新宿本社',
+  };
+  const withLimit = (maxLength: number | null): FormSchema => ({
+    ...mkSchema(),
+    fields: [field({ tag: 'textarea', type: null, name: 'msg', selector: '#msg', labelText: 'お問い合わせ内容', maxLength })],
+    mappings: [{ role: 'message' as FieldRole, selector: '#msg', confidence: 0.9, source: 'rule' }],
+  });
+
+  const full = renderContent(mkCompany(), withLimit(null)).body;
+  const trimmed = renderContent(mkCompany(), withLimit(800)).body;
+  assert.ok(trimmed.length < full.length, 'body should shrink');
+  assert.ok(trimmed.length <= 800, `trimmed=${trimmed.length}`);
+  // §9: the signature must survive the shrink — a truncated message with no
+  // sender contact details must never be sent.
+  assert.match(trimmed, /■━/);
+  assert.match(trimmed, /sho\.fukui@neo-career\.co\.jp/);
   config.sender = previous;
 });

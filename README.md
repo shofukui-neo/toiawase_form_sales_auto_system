@@ -13,7 +13,7 @@ MOCHICA のフォーム経由アウトバウンド営業を自動化するシス
 | L0 リスト生成 | [src/layers/l0_list.ts](src/layers/l0_list.ts) | CSV取込 + **企業HP自動探索**（[l0_homepage.ts](src/layers/l0_homepage.ts)）+ ICPスコアリング + 競合ハード抑制 |
 | L1 フォーム発見 | [src/layers/l1_discovery.ts](src/layers/l1_discovery.ts) | 定番パス→リンク走査→sitemap の段階探索 |
 | L2 構造解析 | [src/layers/l2_parsing.ts](src/layers/l2_parsing.ts) | 辞書マッピング + 構造シグナル + LLMフォールバック + ハニーポット検知 + フラグ検出 + ゲート判定 |
-| L3 文面生成 | [src/layers/l3_content.ts](src/layers/l3_content.ts) | テンプレ + 変数差し込み（決定論的） |
+| L3 文面生成 | [src/layers/l3_content.ts](src/layers/l3_content.ts) | テンプレ + 変数差し込み + 署名生成 + **業種別パーソナライズ**（[l3_personalize.ts](src/layers/l3_personalize.ts)）。全て決定論的 |
 | L4 入力・送信 | [src/layers/l4_submit.ts](src/layers/l4_submit.ts) | **Plan承認→再実行パターン**（本設計の肝） |
 | L5 結果判定 | [src/layers/l5_result.ts](src/layers/l5_result.ts) | 成功/失敗/CAPTCHA/要確認 |
 | L6 記録・返信 | [src/layers/l6_record.ts](src/layers/l6_record.ts) | DB(source of truth) → CSVレポート層 |
@@ -33,6 +33,36 @@ cp .env.example .env         # 送信者情報・ペーシング等を設定
 ```
 
 `.env` の `SENDER_*` は必ず正しい値に（コンプラ§9: 送信元の明示は必須）。
+ここが**フォーム入力値と署名の唯一の出典**で、署名ブロックは `SENDER_*` から組み立てられる
+（`buildSignature()`）。未設定の項目は行ごと落とす（`FAX ：` だけ残るような事故を防ぐ）。
+`SENDER_ADDRESS` は都道府県/市区町村/番地に自動分割され、分割住所欄のあるフォームに対応する。
+`SENDER_PHONE` は代表番号（フォームの「電話番号」欄）、`SENDER_MOBILE` は署名と「携帯電話」欄用。
+
+> **値の捏造はしない**: 未設定の項目は空のまま送る（以前は電話未設定時に `03-0000-0000` を
+> 入れていた）。必須欄が埋まらないフォームは自動除外され、人の判断に回る。
+
+送信者情報やテンプレートを変更したら、ダッシュボードで手動編集した本文が**古い情報のまま固定**
+されていないか確認する（手動編集はテンプレートより優先されるため）:
+
+```bash
+npx tsx scripts/reset_stale_overrides.ts          # 旧文面が残っている企業を確認（dry run）
+npx tsx scripts/reset_stale_overrides.ts --apply  # 旧文面のみ削除（氏名・電話の編集は保持）
+```
+
+### L2（項目マッピング）を改修したあとの移行
+
+解析結果 `field_maps` は**保存されている**ため、L2 の改善は新規に発見した企業にしか効かない。
+既にキューにいる企業は古いマッピングのままなので、明示的に解析し直す:
+
+```bash
+npm run cli -- reparse                        # 解析済みの企業を現行マッパーで再解析 → PARSED に戻す
+npm run cli -- reparse --include-suppressed   # 「非適格」で自動除外された企業もキューに戻して再判定
+npm run cli -- plan                           # 新しいマッピングでプレビューを作り直す
+```
+
+`--include-suppressed` が戻すのは**パーサ自身の適格性判定**による除外（`ineligible_form`）だけ。
+コンプラ由来の抑制（送信済み・配信停止・競合・営業お断り）は解除しない。
+送信済み／送信中の企業は対象外（二重送信の経路を作らないため・§9）。
 `ANTHROPIC_API_KEY` は任意（未設定でも L2 はルールベースで動作、曖昧項目のLLM補完のみ無効）。
 
 > **Node のバージョン**: `better-sqlite3` はネイティブモジュール。Node を上げて
@@ -163,16 +193,34 @@ npm run serve                 # http://localhost:4599
 
 1. **ロール整合の判定**は `labelText` だけでなく `name / id / autocomplete` と `input type`
    を横断照合（`type=email/tel` は最優先、`search_by_zip_code…` は郵便として認識）。分割欄は
-   base ロール（phone/postal/name/kana）に畳んで照合。→ 補助欄・分割欄の誤検知を排除。
+   base ロール（phone/postal/name/kana/address）に畳んで照合。→ 補助欄・分割欄の誤検知を排除。
 2. **入力方針＝必須＋主要身元のみ**（会社名/氏名/フリガナ/メール/電話/本文/同意）。任意の付帯欄
    （部署・郵便番号検索の補助欄・積地/降地 等）は埋めない。L4 実入力と承認プレビューは
-   `shouldFillField()` を共有し、プレビューと実送信が乖離しない。
+   `shouldFillField()` と `resolveFieldValue()` を共有し、プレビューと実送信が1文字も乖離しない
+   （ふりがな→ひらがな変換、「携帯電話」欄への携帯番号差し替えも含む）。
 3. **必須の select/radio**（種別・きっかけ等）は中立安全オプションを自動選択（`法人>企業>その他…`）。
-4. **非適格フォームは自動除外**（キューから外す・[eligibility.ts](src/crosscutting/eligibility.ts)）:
-   CAPTCHA必須 / 営業お断り / 消費者向け・非B2B（介護相談・施設見学・要介護度 等の語を検出） /
-   真実の値を持てない必須が残る / 本文も会社名も入力先が無い。**捏造せず除外**（コンプラ§9）。
+   種別を**チェックボックス群**で表すフォームも同じ基準で**1つだけ**選択する。
+   なお `type=checkbox` というだけで同意欄扱いにはしない（それをやると「OEMについて」「メディア・取材に
+   ついて」等の種別が全部チェックされ、明らかにボットの挙動になる）。同意欄は語で判定する。
+4. **住所の分割入力**（[l2_split.ts](src/layers/l2_split.ts) / `deriveAddressValues`）:
+   都道府県 / 市区町村 / 番地・マンション名 に分かれた欄へ、`SENDER_ADDRESS` を分解して配分する。
+   欄が2つしか無い場合は、**どの構成要素も落とさず重複させない**ように寄せる
+   （都道府県+番地 なら 番地欄に「市区町村＋番地」）。都道府県欄は `<select>` のことが多いため
+   常に都道府県のみ。フォームが1欄なら分割せず住所全体を入れる。
+5. **フリガナのセイ/メイ分割**は `sei/mei`・`lastname/firstname` に加えて、読み仮名の接尾辞が
+   くっついた `form_lastKana` / `form_firstKana` / `kanaSei` 形も認識する。
+6. **本文は maxlength に合わせて決定論的に短縮**（[l3_content.ts](src/layers/l3_content.ts)）。
+   テンプレの `<!--optional-->` ブロックを落として収める。**署名は絶対に削らない** — 途中で切られて
+   送信元の連絡先が消えた文面はコンプラ§9違反になるため、収まらない場合は送信対象から外す。
+7. **非適格フォームは自動除外**（キューから外す・[eligibility.ts](src/crosscutting/eligibility.ts)）:
+   CAPTCHA v2（対話型・突破不能） / 営業お断り / **営業用ではないフォーム**（迷惑メール通報・苦情・
+   解約受付など。`【迷惑メールの内容】迷惑メールの件名` に営業件名を入れると *自社をスパム報告* する
+   ことになる） / 消費者向け・非B2B（介護相談・施設見学・要介護度 等） / 真実の値を持てない必須が残る /
+   本文が maxlength に収まらない / 本文も会社名も入力先が無い。**捏造せず除外**（コンプラ§9）。
    ダッシュボードの「非適格を自動除外」ボタン（`POST /api/sweep`）または `buildPlan` 時に適用され、
    除外理由は「自動除外」セクションに表示（「キューに戻す」で個別復帰可）。
+   なお **reCAPTCHA v3 は不可視・スコア型**で操作対象が無いため除外しない。ただし gate は `mid` 止まり
+   にして全自動送信の対象からは外す（人が承認する）。
 
 ### B — 実ドメインでのL1発見バッチ
 

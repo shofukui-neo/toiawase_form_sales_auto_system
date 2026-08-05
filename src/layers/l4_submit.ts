@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { BrowserSession } from '../browser/browser.js';
 import { extractButtons } from '../browser/extract.js';
 import { judgeResult, type Judgment } from './l5_result.js';
-import { shouldFillField } from './fillPolicy.js';
+import { shouldFillField, resolveFieldValue } from './fillPolicy.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L4');
@@ -25,21 +25,9 @@ const TEXT_ROLES: FieldRole[] = [
   'email', 'email_confirm',
   'phone', 'phone1', 'phone2', 'phone3',
   'postal', 'postal1', 'postal2',
-  'department', 'subject', 'message', 'address',
+  'address', 'address_pref', 'address_city', 'address_street',
+  'department', 'subject', 'message',
 ];
-
-/** Convert katakana to hiragana (フクイ -> ふくい); leaves 'ー', spaces, other chars. */
-function toHiragana(s: string): string {
-  return s.replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-}
-
-/** Some forms label the reading 「ふりがな」and expect hiragana; detect from label/placeholder. */
-function kanaWantsHiragana(field: DetectedField | undefined): boolean {
-  if (!field) return false;
-  const hint = `${field.labelText || ''} ${field.name || ''} ${field.id || ''}`;
-  if (/フリガナ|カナ/.test(hint)) return false; // katakana explicitly requested
-  return /ふりがな|ひらがな/.test(hint) || /[ぁ-ゖ]/.test(field.placeholder || '');
-}
 
 /**
  * Roles whose value may be split across several adjacent boxes:
@@ -56,13 +44,18 @@ const SPLITTABLE = new Set<FieldRole>(['phone', 'postal', 'name', 'kana']);
  * false so the caller types the whole value normally. Extra parts pack into the
  * last box so we never drop digits.
  */
-async function fillSplit(page: Page, selector: string, value: string): Promise<boolean> {
+async function fillSplit(
+  page: Page,
+  selector: string,
+  value: string,
+  reserved: string[],
+): Promise<boolean> {
   // Note: split on whitespace + hyphen variants, but NOT the katakana long-vowel
   // 'ー' (U+30FC), which is a valid character inside kana values (コーポレーション).
   const parts = value.split(/[\s　\-‐－―]+/).filter(Boolean);
   if (parts.length < 2) return false;
   return page.evaluate(
-    ({ sel, parts }) => {
+    ({ sel, parts, reserved }) => {
       const setVal = (input: HTMLInputElement, v: string) => {
         input.value = v;
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -76,7 +69,17 @@ async function fillSplit(page: Page, selector: string, value: string): Promise<b
         const t = (i.getAttribute('type') || 'text').toLowerCase();
         if (!['text', 'tel', 'number'].includes(t)) return false;
         const st = window.getComputedStyle(i);
-        return st.display !== 'none' && st.visibility !== 'hidden';
+        if (st.display === 'none' || st.visibility === 'hidden') return false;
+        // A sibling that belongs to another role (都道府県 / 市区町村 / 番地 sitting
+        // in the same <div> as 郵便番号) must never receive a fragment of this
+        // value — that is how "160" ends up in the 住所 box.
+        return !reserved.some((r) => {
+          try {
+            return i.matches(r);
+          } catch {
+            return false;
+          }
+        });
       });
       if (inputs.length < 2) return false;
       const n = inputs.length;
@@ -85,8 +88,20 @@ async function fillSplit(page: Page, selector: string, value: string): Promise<b
       }
       return true;
     },
-    { sel: selector, parts },
+    { sel: selector, parts, reserved },
   );
+}
+
+/**
+ * Selectors that belong to some *other* control — every other mapped field plus
+ * every honeypot. Passed to {@link fillSplit} so a value is only ever spread
+ * across boxes that nothing else claims.
+ */
+function reservedSelectors(schema: FormSchema, own: string): string[] {
+  const out = new Set<string>();
+  for (const m of schema.mappings) if (m.selector !== own) out.add(m.selector);
+  for (const f of schema.fields) if (f.honeypot) out.add(f.selector);
+  return [...out];
 }
 
 /** Fill every mapped, non-honeypot field. Shared by Plan and Execute so text is identical. */
@@ -98,8 +113,7 @@ async function fillForm(
 ): Promise<void> {
   for (const role of TEXT_ROLES) {
     const mapping = schema.mappings.find((m) => m.role === role);
-    let value = content.values[role];
-    if (!mapping || !value) continue;
+    if (!mapping) continue;
     // Guard: never fill a field flagged as honeypot (defense in depth; ④).
     const field = schema.fields.find((f) => f.selector === mapping.selector);
     if (field?.honeypot) {
@@ -108,8 +122,9 @@ async function fillForm(
     }
     // Fill policy: required + core identity only; skip optional付帯欄 (§承認済み).
     if (!shouldFillField(field, role)) continue;
-    // Reading fields labelled 「ふりがな」expect hiragana, not katakana.
-    if (role === 'kana' && kanaWantsHiragana(field)) value = toHiragana(value);
+    // Shared with the approval preview so the two can never diverge.
+    const value = resolveFieldValue(field, role, content.values);
+    if (!value) continue;
     try {
       if (field?.tag === 'select') {
         await page.locator(mapping.selector).first().selectOption({ label: value }).catch(async () => {
@@ -118,7 +133,10 @@ async function fillForm(
           const pick = opts.find((o) => o && !/選択|please|--/.test(o));
           if (pick) await page.locator(mapping.selector).first().selectOption({ label: pick });
         });
-      } else if (SPLITTABLE.has(role) && (await fillSplit(page, mapping.selector, value))) {
+      } else if (
+        SPLITTABLE.has(role) &&
+        (await fillSplit(page, mapping.selector, value, reservedSelectors(schema, mapping.selector)))
+      ) {
         // handled as a split group
       } else {
         await session.humanType(page, mapping.selector, value);

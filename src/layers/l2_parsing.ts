@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import type { DetectedField, FieldMapping, FieldRole, FormSchema } from '../types.js';
-import { ROLE_RULES } from './l2_dictionary.js';
+import { ROLE_RULES, offTopicFieldIndices } from './l2_dictionary.js';
 import { detectSplitFields } from './l2_split.js';
 import { detectChoiceFields } from './l2_choice.js';
 import { classifyAmbiguousFields } from './l2_llm.js';
@@ -107,6 +107,76 @@ export function ruleMap(
   return { mappings, ambiguousIdx };
 }
 
+export interface MapResult {
+  mappings: FieldMapping[];
+  /** Visible fields no rule claimed — the LLM fallback's input (③). */
+  ambiguousIdx: number[];
+  /** Fields belonging to an off-topic section; never filled. */
+  offTopic: Set<number>;
+  /** A required choice was auto-picked by fallback (課題C) — caps the gate. */
+  ambiguousChoice: boolean;
+}
+
+/**
+ * The whole field→role decision, as a pure function of the detected fields.
+ *
+ * parseForm runs it twice: once to learn which fields stayed ambiguous, then
+ * again with the LLM's answers folded in. Keeping it browser-free is what lets
+ * the tests replay real captured forms without Playwright.
+ */
+export function mapFields(
+  fields: DetectedField[],
+  opts: { llm?: { selector: string; role: FieldRole; confidence: number }[] } = {},
+): MapResult {
+  // Off-topic sections (【迷惑メールの内容】…) are excluded from every mapper so
+  // no sales value can ever reach them (l2_dictionary).
+  const offTopic = offTopicFieldIndices(fields);
+
+  // Split-field detection first (課題A/B/D): claim phone/name/kana/postal/住所
+  // sub-fields and the email-confirm box so the generic mapper won't jam a
+  // whole value into the first box.
+  const split = detectSplitFields(fields, { skip: offTopic });
+  const skipForRules = new Set<number>([...split.consumed, ...offTopic]);
+  const { mappings: ruleMappings, ambiguousIdx } = ruleMap(fields, { skip: skipForRules });
+  const mappings: FieldMapping[] = [...split.mappings, ...ruleMappings];
+
+  // LLM fallback results (③), if any — never overwrite a rule-assigned role.
+  const usedRoles = new Set(mappings.map((m) => m.role));
+  for (const m of opts.llm ?? []) {
+    if (m.role !== 'agree' && usedRoles.has(m.role)) continue;
+    if (offTopic.has(fields.findIndex((f) => f.selector === m.selector))) continue;
+    usedRoles.add(m.role);
+    mappings.push({ role: m.role, selector: m.selector, confidence: m.confidence, source: 'llm' });
+  }
+
+  // Positional email_confirm: forms often place the "re-enter your email"
+  // instruction in separate help text (not the field's own label), so keyword
+  // matching misses it. If email is mapped and a second email-ish field is
+  // still unmapped, treat it as the confirmation field.
+  if (!mappings.some((m) => m.role === 'email_confirm')) {
+    const emailSel = mappings.find((m) => m.role === 'email')?.selector;
+    const taken = new Set(mappings.map((m) => m.selector));
+    const confirm = fields.find(
+      (f, i) =>
+        !f.honeypot &&
+        !offTopic.has(i) &&
+        f.selector !== emailSel &&
+        !taken.has(f.selector) &&
+        ((f.type || '') === 'email' || /mail|メール/i.test(`${f.name || ''} ${f.id || ''} ${f.labelText || ''}`)),
+    );
+    if (emailSel && confirm) {
+      mappings.push({ role: 'email_confirm', selector: confirm.selector, confidence: 0.7, source: 'structure' });
+    }
+  }
+
+  // Required select/radio auto-selection (課題C), on fields nothing else claimed.
+  const mappedSelectors = new Set(mappings.map((m) => m.selector));
+  const choice = detectChoiceFields(fields, mappedSelectors);
+  mappings.push(...choice.mappings);
+
+  return { mappings, ambiguousIdx, offTopic, ambiguousChoice: choice.ambiguous };
+}
+
 export interface ParseInput {
   formUrl: string;
   formConfidence: number;
@@ -138,46 +208,14 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       primaryFormSelector(page),
     ]);
 
-    // Split-field detection first (課題A/B/D): claim phone/name/kana/postal
-    // sub-fields and the email-confirm box so the generic mapper won't jam a
-    // whole value into the first box.
-    const split = detectSplitFields(fields);
-    const { mappings: ruleMappings, ambiguousIdx } = ruleMap(fields, { skip: split.consumed });
-    const mappings: FieldMapping[] = [...split.mappings, ...ruleMappings];
-
-    // LLM fallback on ambiguous fields only, batched (③).
-    const ambiguousFields = ambiguousIdx.map((i) => fields[i]);
-    const llm = await classifyAmbiguousFields(ambiguousFields);
-    const usedRoles = new Set(mappings.map((m) => m.role));
-    for (const m of llm) {
-      if (m.role !== 'agree' && usedRoles.has(m.role)) continue;
-      usedRoles.add(m.role);
-      mappings.push({ role: m.role, selector: m.selector, confidence: m.confidence, source: 'llm' });
+    // Pass 1: rules only — tells us which fields stayed ambiguous.
+    const first = mapFields(fields);
+    if (first.offTopic.size) {
+      log.warn(`${formUrl} has ${first.offTopic.size} off-topic field(s) — not a sales inquiry form`);
     }
-
-    // Positional email_confirm: forms often place the "re-enter your email"
-    // instruction in separate help text (not the field's own label), so keyword
-    // matching misses it. If email is mapped and a second email-ish field is
-    // still unmapped, treat it as the confirmation field.
-    if (!mappings.some((m) => m.role === 'email_confirm')) {
-      const emailSel = mappings.find((m) => m.role === 'email')?.selector;
-      const taken = new Set(mappings.map((m) => m.selector));
-      const confirm = fields.find(
-        (f) =>
-          !f.honeypot &&
-          f.selector !== emailSel &&
-          !taken.has(f.selector) &&
-          ((f.type || '') === 'email' || /mail|メール/i.test(`${f.name || ''} ${f.id || ''} ${f.labelText || ''}`)),
-      );
-      if (emailSel && confirm) {
-        mappings.push({ role: 'email_confirm', selector: confirm.selector, confidence: 0.7, source: 'structure' });
-      }
-    }
-
-    // Required select/radio auto-selection (課題C), on fields nothing else claimed.
-    const mappedSelectors = new Set(mappings.map((m) => m.selector));
-    const choice = detectChoiceFields(fields, mappedSelectors);
-    mappings.push(...choice.mappings);
+    // LLM fallback on ambiguous fields only, batched (③), then re-map with its answers.
+    const llm = await classifyAmbiguousFields(first.ambiguousIdx.map((i) => fields[i]));
+    const { mappings, ambiguousChoice } = llm.length ? mapFields(fields, { llm }) : first;
 
     const hasHoneypot = fields.some((f) => f.honeypot);
     const hasConfirmScreen = buttons.some((b) => b.kind === 'confirm');
@@ -192,7 +230,7 @@ export async function parseForm(input: ParseInput): Promise<FormSchema> {
       hasCaptcha: captcha,
       hasHoneypot,
       noSalesPolicy: noSalesHit !== null,
-      ambiguousChoice: choice.ambiguous,
+      ambiguousChoice,
       mappingConfidence: 0,
       gate: 'low',
     };

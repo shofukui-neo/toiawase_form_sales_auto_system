@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import { companies } from './db/repositories.js';
 import { ingestCsv, ingestCsvWithResolve, parseCompaniesCsv } from './layers/l0_list.js';
 import { resolveHomepage } from './layers/l0_homepage.js';
-import { discoverAndParse, buildPlan, runExecute } from './pipeline/pipeline.js';
+import { discoverAndParse, buildPlan, runExecute, reparse } from './pipeline/pipeline.js';
 import { listPending, approve, reject, suppressCompany } from './pipeline/approval.js';
 import { exportReport, exportSuppression } from './layers/l6_record.js';
 import { nextSendDelayMs } from './crosscutting/pacing.js';
@@ -98,6 +98,29 @@ program
     for (const c of batch) {
       await discoverAndParse(c.id).catch((e) => log.error(`company ${c.id}: ${e.message}`));
     }
+    printStatus();
+  });
+
+program
+  .command('reparse')
+  .description('L2 再解析 — 解析済みフォームを現行マッパーで解析し直す（L2改修後の移行用）')
+  .option('-l, --limit <n>', 'max companies to process', '200')
+  .option('--include-suppressed', '「非適格」で自動除外された企業もキューに戻す', false)
+  .action(async (o: { limit: string; includeSuppressed: boolean }) => {
+    const limit = Number(o.limit);
+    // 送信済み(SUBMITTED_SUCCESS)/送信中は対象外。二重送信の経路を作らない (§9)。
+    const batch = companies
+      .all()
+      .filter((c) => c.form_url && (o.includeSuppressed || c.status !== 'SUPPRESSED'))
+      .slice(0, limit);
+    log.info(`reparsing ${batch.length} companies (includeSuppressed=${o.includeSuppressed})`);
+    const tally = { reparsed: 0, skipped: 0, failed: 0 };
+    for (const c of batch) {
+      const r = await reparse(c.id, { includeSuppressed: o.includeSuppressed });
+      tally[r]++;
+    }
+    log.info(`reparsed=${tally.reparsed} skipped=${tally.skipped} failed=${tally.failed}`);
+    log.info('次に `plan` を実行すると、新しいマッピングでプレビューが作り直されます。');
     printStatus();
   });
 

@@ -1,5 +1,6 @@
 import type { FormSchema, DetectedField } from '../types.js';
 import type { CoverageResult } from '../layers/coverage.js';
+import { OFF_TOPIC_FIELD_RE } from '../layers/l2_dictionary.js';
 
 /**
  * Form eligibility gate (承認済みポリシー: 非適格フォームは自動除外).
@@ -19,8 +20,10 @@ import type { CoverageResult } from '../layers/coverage.js';
 export type IneligibleReason =
   | 'captcha'
   | 'no_sales_policy'
+  | 'off_topic_form'
   | 'consumer_form'
   | 'unfillable_required'
+  | 'message_too_long'
   | 'not_contactable';
 
 export interface Eligibility {
@@ -47,11 +50,24 @@ function labelHay(f: DetectedField): string {
  * decided from exactly what L4 will type.
  */
 export function classifyEligibility(schema: FormSchema, cov: CoverageResult): Eligibility {
-  if (schema.hasCaptcha && schema.hasCaptcha !== 'none') {
+  // Only an *interactive* challenge is disqualifying. reCAPTCHA v3 is invisible
+  // (no widget to solve); those forms stay in the queue but never auto-send —
+  // gate.ts caps them at 'mid' so a human approves each one.
+  if (schema.hasCaptcha === 'v2') {
     return { eligible: false, reason: 'captcha', detail: schema.hasCaptcha };
   }
   if (schema.noSalesPolicy) {
     return { eligible: false, reason: 'no_sales_policy' };
+  }
+
+  // Off-topic form (迷惑メール通報 / 苦情 / 解約 受付). Checked before the generic
+  // "un-fillable required" rule so the log says *why* the form was dropped.
+  const offTopicHit = schema.fields
+    .filter((f) => !f.honeypot)
+    .map(labelHay)
+    .find((h) => OFF_TOPIC_FIELD_RE.test(h));
+  if (offTopicHit) {
+    return { eligible: false, reason: 'off_topic_form', detail: offTopicHit.replace(/\s+/g, ' ').slice(0, 40) };
   }
 
   // Consumer / non-B2B: scan every non-honeypot field's text for care/visit signals.
@@ -66,6 +82,13 @@ export function classifyEligibility(schema: FormSchema, cov: CoverageResult): El
   // A required field we cannot truthfully fill remains after mapping+auto-choice.
   if (cov.coverage.missing > 0) {
     return { eligible: false, reason: 'unfillable_required', detail: `${cov.coverage.missing} 件` };
+  }
+
+  // The message does not fit the textarea even after L3's shrink pass. Submitting
+  // would silently cut the text mid-way and drop the signature — leaving a
+  // message with no sender contact details, which §9 forbids.
+  if (cov.coverage.overflow > 0) {
+    return { eligible: false, reason: 'message_too_long', detail: `${cov.coverage.overflow} 件` };
   }
 
   // Nowhere to put the sales pitch: neither a message body nor a company field
