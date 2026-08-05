@@ -59,7 +59,7 @@ export interface CoverageResult {
  * id="name_1", is recognised. Split sub-roles fold to their base first.
  */
 const ROLE_LABEL_HINTS: Partial<Record<FieldRole, RegExp>> = {
-  company: /会社|企業|法人|団体|貴社|御社|組織|屋号|勤務先|store|company|corp|organization/i,
+  company: /会社|企業|法人|団体|貴社|御社|組織|屋号|勤務先|事業所|store|company|corp|organization|office|kaisha/i,
   name: /名前|氏名|お名前|ご芳名|担当|ご担当|なまえ|氏|姓|名|sei|mei|name|lastname|firstname|family|given/i,
   kana: /フリガナ|ふりがな|カナ|かな|セイ|メイ|せい|めい|よみ|読み|kana|furigana|katakana|ruby|yomi/i,
   email: /メール|mail|e-?mail|アドレス|_mail|mailaddr/i,

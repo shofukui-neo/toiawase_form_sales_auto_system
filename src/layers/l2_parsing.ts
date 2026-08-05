@@ -54,6 +54,8 @@ export function ruleMap(
       const kwHit = rule.keywords.some((k) => hay.includes(k.toLowerCase()));
       const typeHit = rule.types?.includes(fType) ?? false;
       if (!kwHit && !typeHit) continue;
+      // A disqualifying keyword wins over a match (office_address is 住所, not 会社名).
+      if (rule.exclude?.some((k) => hay.includes(k.toLowerCase()))) continue;
       // Text roles must never bind to a checkbox/radio (a 送信確認 checkbox's
       // label contains 確認 and would otherwise steal the email_confirm role).
       if (rule.role !== 'agree' && (fType === 'checkbox' || fType === 'radio')) continue;

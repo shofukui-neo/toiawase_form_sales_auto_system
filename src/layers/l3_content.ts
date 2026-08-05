@@ -82,14 +82,16 @@ export function buildSignature(): string {
   const person = s.person.replace(/[\s　]+/g, '');
   if (person) lines.push(s.personRomaji ? `${person}／${s.personRomaji}` : person);
 
+  // 連絡先行には、フォームの電話番号欄に入れるのと同じ番号を載せる。番号が
+  // 携帯（070/080/090）かどうかでラベルを選ぶので、番号を差し替えても署名が嘘にならない。
   const contact: string[] = [];
-  if (s.mobile) contact.push(`携帯電話：${s.mobile}`);
+  if (s.phone) contact.push(`${/^0[789]0[-\s]?\d/.test(s.phone) ? '携帯電話' : '電話'}：${s.phone}`);
   if (s.email) contact.push(`E-mail：${s.email}`);
   if (contact.length) lines.push('', ...contact);
 
   const office: string[] = [];
   if (s.postal || s.address) office.push(`〒${s.postal} ${s.address}`.trim());
-  if (s.phone) office.push(`電話：${s.phone}`);
+  if (s.officePhone) office.push(`電話：${s.officePhone}`);
   if (s.fax) office.push(`FAX ：${s.fax}`);
   if (s.url) office.push(`URL：${s.url}`);
   if (office.length) lines.push('', `◆${s.office || '本社'}`, ...office);
@@ -170,7 +172,7 @@ export function renderContent(
     senderDepartment: s.department,
     senderEmail: s.email,
     senderPhone: s.phone,
-    senderMobile: s.mobile,
+    senderOfficePhone: s.officePhone,
     // 「その企業である理由」— 業種推定に基づく導入文 (l3_personalize)。
     reason: p.reason,
     industry: p.industry,
@@ -204,11 +206,14 @@ export function renderContent(
   const fallbackSubject = subject || `お問い合わせ（${company.name}）`;
   const fallbackBody = body || `お世話になっております。${company.name}の採用ご担当者様へのお問い合わせです。`;
   const values: Partial<Record<FieldRole, string>> = {
-    company: company.name,
     subject: fallbackSubject,
     message: fallbackBody,
     agree: 'on',
   };
+  // 会社名欄は「問い合わせている側＝当社」を書く欄。宛先企業名 (`company.name`) は
+  // 本文の書き出しに使う `{{company}}` であって、この欄ではない。取り違えると
+  // 受け取った側は 会社名 に自社名が入った問い合わせを見ることになる。
+  if (s.company) values.company = s.company;
   if (s.person) values.name = s.person;
   if (s.email) {
     values.email = s.email;

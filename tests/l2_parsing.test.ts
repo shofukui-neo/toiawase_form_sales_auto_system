@@ -4,6 +4,7 @@ import { ruleMap, mapFields } from '../src/layers/l2_parsing.js';
 import { detectSplitFields } from '../src/layers/l2_split.js';
 import { detectChoiceFields, pickOption } from '../src/layers/l2_choice.js';
 import { renderContent, deriveAddressValues, buildSignature } from '../src/layers/l3_content.js';
+import { isCoreRole, shouldFillField } from '../src/layers/fillPolicy.js';
 import { personalize } from '../src/layers/l3_personalize.js';
 import { config, splitAddress } from '../src/config.js';
 import type { DetectedField, CompanyRow, FormSchema, FieldRole } from '../src/types.js';
@@ -403,6 +404,85 @@ test('deriveAddressValues: every component lands somewhere, exactly once', () =>
   });
 });
 
+test('会社名欄には宛先企業ではなく自社名が入る', () => {
+  const previous = { ...config.sender };
+  config.sender = { ...config.sender, company: '株式会社ネオキャリア', person: '福井 聖' };
+
+  const content = renderContent({ ...mkCompany(), name: '株式会社ヨコオ' }, mkSchema());
+  // フォームの「会社名」は問い合わせている側の欄。宛先企業名を入れると、
+  // 受信者は自社名が会社名欄に入った問い合わせを受け取ることになる。
+  assert.equal(content.values.company, '株式会社ネオキャリア');
+  // 宛先企業名は本文の書き出しに使う。
+  assert.match(content.body, /^株式会社ヨコオ/);
+
+  config.sender = previous;
+});
+
+test('電話番号欄には署名の連絡先番号が入る（本社代表番号ではない）', () => {
+  const previous = { ...config.sender };
+  config.sender = { ...config.sender, phone: '080-6813-0780', officePhone: '03-5908-8405' };
+
+  const content = renderContent(mkCompany(), mkSchema());
+  assert.equal(content.values.phone, '080-6813-0780');
+  // 分割3欄フォームにも同じ番号が配分される。
+  assert.equal(content.values.phone1, '080');
+  assert.equal(content.values.phone2, '6813');
+  assert.equal(content.values.phone3, '0780');
+
+  // 署名では連絡先＝携帯、本社ブロック＝代表番号、と役割が分かれる。
+  const sig = buildSignature();
+  assert.match(sig, /携帯電話：080-6813-0780/);
+  assert.match(sig, /電話：03-5908-8405/);
+
+  // 固定電話を連絡先に設定した場合はラベルが「電話」になる（署名が嘘にならない）。
+  config.sender = { ...config.sender, phone: '03-5908-8405' };
+  assert.match(buildSignature(), /\n電話：03-5908-8405/);
+
+  config.sender = previous;
+});
+
+test('company: 属性名だけの企業・団体名欄も拾う（ラベルなし form_office）', () => {
+  const { mappings } = mapFields([
+    field({ name: 'form_office', labelText: '', selector: '#office' }),
+    field({ name: 'form_message', labelText: '', selector: '#msg', tag: 'textarea', type: null }),
+  ]);
+  assert.equal(mappings.find((m) => m.role === 'company')?.selector, '#office');
+});
+
+test('company: office_address / office_tel は会社名として奪わない', () => {
+  // 広いキーワードが複合欄でより具体的なルールを out-score しないこと。
+  const { mappings } = mapFields([
+    field({ name: 'office_name', labelText: '会社名', selector: '#c' }),
+    field({ name: 'office_address', labelText: '所在地', selector: '#a' }),
+    field({ name: 'office_tel', labelText: '電話番号', selector: '#t' }),
+  ]);
+  const roleOf = (sel: string) => mappings.find((m) => m.selector === sel)?.role;
+  assert.equal(roleOf('#c'), 'company');
+  assert.equal(roleOf('#a'), 'address');
+  assert.equal(roleOf('#t'), 'phone');
+});
+
+test('fill policy: 住所・郵便番号は任意欄でも本社所在地を入力する', () => {
+  // yokowo.co.jp — 郵便番号/都道府県/市区町村/市区町村以降 がすべて「任意」。
+  // 以前は任意の住所欄を一律スキップしていたため、全部空欄で送信していた。
+  const addr = (name: string, label: string, required: boolean) =>
+    field({ name, labelText: label, selector: `#${name}`, required });
+  const fields = [
+    addr('form_postCode', '郵便番号 (例：000-0000)', false),
+    field({ tag: 'select', type: null, name: 'form_prefectures', labelText: '都道府県', selector: '#form_prefectures',
+      required: false, options: ['選択してください', '北海道', '東京都', '大阪府'] }),
+    addr('form_address1', '市区町村 (例：千代田区)', false),
+    addr('form_address2', '市区町村以降 (例：□□町1-1-1)', false),
+  ];
+  for (const role of ['postal', 'address_pref', 'address_city', 'address_street'] as FieldRole[]) {
+    assert.equal(isCoreRole(role), true, `${role} should be core`);
+    assert.equal(shouldFillField(fields[0], role), true, `${role} should fill even when optional`);
+  }
+  // 部署は従来どおり「必須のときだけ」入力する。
+  assert.equal(shouldFillField(fields[0], 'department'), false);
+  assert.equal(shouldFillField({ ...fields[0], required: true }, 'department'), true);
+});
+
 /* --------------- 非営業フォーム（迷惑メール通報など）の保護 --------------- */
 
 test('off-topic: 迷惑メール report fields are never mapped', () => {
@@ -466,7 +546,7 @@ test('signature: built from the configured identity, no dangling labels', () => 
     ...config.sender,
     company: '株式会社ネオキャリア', department: '事業開発本部 事業開発部',
     person: '福井 聖', personRomaji: 'Sho Fukui', email: 'sho.fukui@neo-career.co.jp',
-    phone: '03-5908-8405', mobile: '080-6813-0780', fax: '03-5908-8158',
+    phone: '080-6813-0780', officePhone: '03-5908-8405', fax: '03-5908-8158',
     url: 'http://www.neo-career.co.jp', postal: '160-0023',
     address: '東京都新宿区西新宿1丁目22-2', office: '新宿本社',
   };
@@ -506,7 +586,7 @@ test('render: body carries the personalised reason and the full signature', () =
   config.sender = {
     ...config.sender,
     company: '株式会社ネオキャリア', person: '福井 聖', personRomaji: 'Sho Fukui',
-    email: 'sho.fukui@neo-career.co.jp', phone: '03-5908-8405', mobile: '080-6813-0780',
+    email: 'sho.fukui@neo-career.co.jp', phone: '080-6813-0780', officePhone: '03-5908-8405',
     department: '事業開発本部 事業開発部', postal: '160-0023',
     address: '東京都新宿区西新宿1丁目22-2', office: '新宿本社',
   };
@@ -523,7 +603,7 @@ test('render: body is shrunk to fit a maxlength, keeping the signature', () => {
   config.sender = {
     ...config.sender,
     company: '株式会社ネオキャリア', person: '福井 聖', email: 'sho.fukui@neo-career.co.jp',
-    phone: '03-5908-8405', mobile: '080-6813-0780', department: '事業開発本部 事業開発部',
+    phone: '080-6813-0780', officePhone: '03-5908-8405', department: '事業開発本部 事業開発部',
     postal: '160-0023', address: '東京都新宿区西新宿1丁目22-2', office: '新宿本社',
   };
   const withLimit = (maxLength: number | null): FormSchema => ({

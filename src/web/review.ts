@@ -16,7 +16,7 @@ export interface EditableField {
 
 /** Roles the dashboard lets a human edit, in display order. */
 const EDITABLE_ROLES: { role: FieldRole; label: string; multiline?: boolean }[] = [
-  { role: 'company', label: '会社名' },
+  { role: 'company', label: '会社名（自社名。宛先企業名ではありません）' },
   { role: 'name', label: '担当者名（氏名）' },
   { role: 'kana', label: 'フリガナ' },
   { role: 'email', label: 'メールアドレス' },

@@ -31,10 +31,10 @@ export interface SenderIdentity {
   personRomaji: string;
   kana: string;
   email: string;
-  /** 会社代表番号 — the default value for a form's 電話番号 field. */
+  /** 連絡先番号 — what goes into a form's 電話番号 field and the signature contact line. */
   phone: string;
-  /** 携帯番号 — used for a 携帯電話-labelled field and in the signature. */
-  mobile: string;
+  /** 本社代表番号 — signature office block only; never typed into a form. */
+  officePhone: string;
   fax: string;
   url: string;
   /** Katakana reading of 姓/名 for split フリガナ fields (課題B). Empty = unset. */
@@ -116,7 +116,7 @@ export const config: AppConfig = {
     kana: envStr('SENDER_KANA', ''),
     email: envStr('SENDER_EMAIL', ''),
     phone: envStr('SENDER_PHONE', ''),
-    mobile: envStr('SENDER_MOBILE', ''),
+    officePhone: envStr('SENDER_OFFICE_PHONE', ''),
     fax: envStr('SENDER_FAX', ''),
     url: envStr('SENDER_URL', ''),
     kanaSei: envStr('SENDER_KANA_SEI', ''),

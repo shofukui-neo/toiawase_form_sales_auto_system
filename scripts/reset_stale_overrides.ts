@@ -1,6 +1,7 @@
 import { config } from '../src/config.js';
 import { companies, contentOverrides } from '../src/db/repositories.js';
 import { buildSignature } from '../src/layers/l3_content.js';
+import type { FieldRole } from '../src/types.js';
 
 /**
  * Drop dashboard message/subject edits that were written against an older
@@ -58,6 +59,25 @@ function stalenessReasons(text: string): string[] {
   return reasons;
 }
 
+/**
+ * Sender-identity roles and the value `.env` now supplies for each.
+ *
+ * These are *global* facts about us, not per-company decisions, so a stored
+ * per-company override of 電話番号 or 会社名 has no legitimate use — it only
+ * pins whatever the identity happened to be on the day someone clicked save,
+ * and silently outranks `.env` forever after.
+ */
+const IDENTITY_ROLES: [FieldRole, string][] = [
+  ['company', config.sender.company],
+  ['name', config.sender.person],
+  ['email', config.sender.email],
+  ['phone', config.sender.phone],
+  ['kana', [config.sender.kanaSei, config.sender.kanaMei].filter(Boolean).join(' ')],
+  ['postal', config.sender.postal],
+  ['address', config.sender.address],
+  ['department', config.sender.department],
+];
+
 let checked = 0;
 let stale = 0;
 
@@ -66,22 +86,40 @@ for (const company of companies.all()) {
   if (!ov) continue;
   checked++;
 
-  const message = ov.values.message;
-  if (typeof message !== 'string' || message.length === 0) continue;
-  const reasons = stalenessReasons(message);
-  if (reasons.length === 0) continue;
+  const reasons: string[] = [];
+  const dropped: FieldRole[] = [];
 
+  const message = ov.values.message;
+  if (typeof message === 'string' && message.length > 0) {
+    const bodyReasons = stalenessReasons(message);
+    if (bodyReasons.length > 0) {
+      reasons.push(...bodyReasons);
+      dropped.push('message');
+      // 件名は本文と同じ編集操作で保存されるため、まとめて破棄する。
+      if (ov.values.subject != null) dropped.push('subject');
+    }
+  }
+
+  for (const [role, current] of IDENTITY_ROLES) {
+    const pinned = ov.values[role];
+    if (typeof pinned !== 'string') continue;
+    dropped.push(role);
+    reasons.push(
+      pinned === current
+        ? `${role} は .env と同値のため上書きが不要（"${pinned}"）`
+        : `${role} が旧値で固定されている（"${pinned}" → .env: "${current || '未設定'}"）`,
+    );
+  }
+
+  if (dropped.length === 0) continue;
   stale++;
-  // 件名は本文と同じ編集操作で保存されるため、まとめて破棄する。
-  const dropped = ['message', ...(ov.values.subject != null ? ['subject'] : [])];
   console.log(`#${company.id} ${company.name}`);
   for (const r of reasons) console.log(`    - ${r}`);
   console.log(`    -> 破棄対象: ${dropped.join(', ')}`);
   if (!apply) continue;
 
   const kept = { ...ov.values };
-  delete kept.message;
-  delete kept.subject;
+  for (const role of dropped) delete kept[role];
   if (Object.keys(kept).length === 0) contentOverrides.clear(company.id);
   else contentOverrides.set(company.id, { values: kept });
 }

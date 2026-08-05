@@ -33,6 +33,13 @@ export interface RoleRule {
   role: FieldRole;
   /** Keywords (substring, case-insensitive). */
   keywords: string[];
+  /**
+   * Disqualifying keywords. A rule with a broad keyword (`office` for 会社名) would
+   * otherwise out-score a more specific rule on a compound field like
+   * `office_address` / `office_tel`, because assignment is per-field
+   * highest-confidence and 会社名 carries a higher weight than 住所.
+   */
+  exclude?: string[];
   /** Optional input types that strongly imply this role. */
   types?: string[];
   /** Base confidence when a keyword matches. */
@@ -97,6 +104,17 @@ export const ROLE_RULES: RoleRule[] = [
       '組織名',
       'お客様名',
       '企業・団体名',
+      // 企業・団体名 boxes whose only signal is the attribute name (yokowo's
+      // form_office carries no label at all, so the whole 会社名 row went blank).
+      'office',
+      '事業所',
+      '勤務先',
+      'corp',
+      'kaisha',
+    ],
+    exclude: [
+      '住所', '所在地', 'address', 'addr', '電話', 'tel', 'phone', 'fax',
+      'メール', 'mail', '郵便', 'zip', 'postal', '担当', '氏名', 'ふりがな', 'フリガナ',
     ],
     weight: 0.9,
   },
