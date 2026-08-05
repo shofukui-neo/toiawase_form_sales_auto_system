@@ -157,11 +157,16 @@ export function personalize(company: CompanyRow): Personalization {
     };
   }
 
+  // 業種課題の一文は最も長い（〜130字）。本文が textarea の maxlength に収まらない
+  // ときに落とせるよう optional:2 で囲む。囲みは L3 の縮約処理が解釈する
+  // (l3_content の fitOptional)。落ちても「なぜ御社か」の一文目は必ず残る。
   return {
     industry: rule.industry,
     reason:
       `${name}様の事業内容を拝見し、${rule.industry}分野で新卒採用に取り組まれていると存じ、ご連絡いたしました。\n` +
+      `<!--optional:2-->\n` +
       `${rule.industry}の企業様からは、${rule.pain}に課題を感じている、というお声を多くいただいております。\n` +
+      `<!--/optional-->\n` +
       `${name}様でも近しい状況がございましたら、お役に立てるのではないかと考えております。`,
   };
 }

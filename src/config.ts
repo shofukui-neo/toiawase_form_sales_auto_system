@@ -37,6 +37,8 @@ export interface SenderIdentity {
   officePhone: string;
   fax: string;
   url: string;
+  /** 日程調整ページ URL. Empty = the scheduling paragraph is dropped entirely. */
+  bookingUrl: string;
   /** Katakana reading of 姓/名 for split フリガナ fields (課題B). Empty = unset. */
   kanaSei: string;
   kanaMei: string;
@@ -119,6 +121,7 @@ export const config: AppConfig = {
     officePhone: envStr('SENDER_OFFICE_PHONE', ''),
     fax: envStr('SENDER_FAX', ''),
     url: envStr('SENDER_URL', ''),
+    bookingUrl: envStr('SENDER_BOOKING_URL', ''),
     kanaSei: envStr('SENDER_KANA_SEI', ''),
     kanaMei: envStr('SENDER_KANA_MEI', ''),
     postal: envStr('SENDER_POSTAL', ''),

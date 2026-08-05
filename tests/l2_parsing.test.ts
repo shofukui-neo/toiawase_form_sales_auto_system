@@ -598,6 +598,27 @@ test('render: body carries the personalised reason and the full signature', () =
   config.sender = previous;
 });
 
+test('render: 日程調整URLが本文に入り、未設定なら案内文ごと消える', () => {
+  const previous = { ...config.sender };
+  const url = 'https://booking.receptionist.jp/mochicasales2025/30min';
+  config.sender = { ...config.sender, company: '株式会社ネオキャリア', email: 'a@b.co.jp', bookingUrl: url };
+
+  const withUrl = renderContent(mkCompany(), mkSchema()).body;
+  assert.ok(withUrl.includes(url), '日程調整URLが本文にない');
+  assert.match(withUrl, /オンラインでのご説明（30分程度）/);
+
+  // 未設定なら「下記より」だけが宙に浮かないよう、案内文ごと落とす。
+  config.sender = { ...config.sender, bookingUrl: '' };
+  const without = renderContent(mkCompany(), mkSchema()).body;
+  assert.equal(without.includes('booking.receptionist.jp'), false);
+  assert.equal(/オンラインでのご説明/.test(without), false);
+  assert.equal(without.includes('{{'), false, '未置換のプレースホルダが残っている');
+  // 署名など後続の本文は無傷。
+  assert.match(without, /■━/);
+
+  config.sender = previous;
+});
+
 test('render: body is shrunk to fit a maxlength, keeping the signature', () => {
   const previous = { ...config.sender };
   config.sender = {
@@ -620,5 +641,30 @@ test('render: body is shrunk to fit a maxlength, keeping the signature', () => {
   // sender contact details must never be sent.
   assert.match(trimmed, /■━/);
   assert.match(trimmed, /sho\.fukui@neo-career\.co\.jp/);
+  // 縮約は段階的（tier1 だけ → tier1+2）で、途中段階が存在する。
+  const mid = renderContent(mkCompany(), withLimit(950)).body;
+  assert.ok(mid.length < full.length && mid.length > trimmed.length, `mid=${mid.length}`);
+  config.sender = previous;
+});
+
+test('render: ブロック除去後に空行が残らない', () => {
+  const previous = { ...config.sender };
+  config.sender = {
+    ...config.sender, company: '株式会社ネオキャリア', person: '福井 聖',
+    email: 'a@b.co.jp', bookingUrl: 'https://example.com/book',
+  };
+  const withLimit = (maxLength: number | null): FormSchema => ({
+    ...mkSchema(),
+    fields: [field({ tag: 'textarea', type: null, name: 'msg', selector: '#msg', maxLength })],
+    mappings: [{ role: 'message' as FieldRole, selector: '#msg', confidence: 0.9, source: 'rule' }],
+  });
+  // 業種が当たる社名（＝reason 内にも optional ブロックが入る）で全段階を検査。
+  const c = { ...mkCompany(), name: '福山通運株式会社', domain: 'fukutsu.co.jp' };
+  for (const limit of [null, 1000, 800]) {
+    const body = renderContent(c, withLimit(limit)).body;
+    assert.equal(/\n{3,}/.test(body), false, `空行が3連以上 (limit=${limit})`);
+    assert.equal(/<!--/.test(body), false, `マーカーが残っている (limit=${limit})`);
+    assert.equal(/^\s|\s$/.test(body), false, `前後に空白 (limit=${limit})`);
+  }
   config.sender = previous;
 });

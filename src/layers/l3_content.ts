@@ -39,14 +39,44 @@ function substitute(text: string, vars: Record<string, string>): string {
   return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => vars[k] ?? '');
 }
 
-/** `<!--optional-->…<!--/optional-->` — the part we drop to fit a maxlength. */
-const OPTIONAL_BLOCK = /[\r\n]*<!--optional-->[\s\S]*?<!--\/optional-->/g;
-
-function stripOptional(body: string): string {
-  return body.replace(OPTIONAL_BLOCK, '');
+/**
+ * `<!--if:var-->…<!--/if-->` — kept only when `vars[var]` is non-empty.
+ *
+ * Lets the copy around an optional value (the 日程調整 URL) live in the template
+ * with the rest of the wording, instead of being assembled in code, while still
+ * disappearing cleanly when the value is unset — no orphaned "下記より" pointing
+ * at nothing.
+ */
+function applyConditionals(body: string, vars: Record<string, string>): string {
+  return body.replace(
+    /(\r?\n*)<!--if:(\w+)-->\r?\n([\s\S]*?)\r?\n?<!--\/if-->/g,
+    (_m, nl: string, key: string, inner: string) => (vars[key] ? `${nl}${inner}` : ''),
+  );
 }
-function keepOptional(body: string): string {
-  return body.replace(/<!--\/?optional-->\r?\n?/g, '');
+
+/**
+ * `<!--optional:N-->…<!--/optional-->` — copy we drop, lowest N first, to fit a
+ * maxlength. Everything outside these blocks is load-bearing: the greeting, the
+ * reason we are writing, the CTA, the signature (§9) and the opt-out notice.
+ */
+const OPTIONAL_BLOCK = /(\r?\n*)<!--optional:(\d)-->\r?\n([\s\S]*?)\r?\n?<!--\/optional-->/g;
+/** Highest tier defined in the templates; shrinking walks 1..MAX. */
+const MAX_OPTIONAL_TIER = 2;
+
+/** Drop every optional block whose tier is <= `dropUpTo` (0 keeps all of them). */
+function fitOptional(body: string, dropUpTo: number): string {
+  return body.replace(OPTIONAL_BLOCK, (_m, nl: string, tier: string, inner: string) =>
+    Number(tier) <= dropUpTo ? '' : `${nl}${inner}`,
+  );
+}
+
+/**
+ * Collapse the blank-line residue left where a block marker or a dropped block
+ * used to be. Without this, every message carries two or three empty lines in
+ * the middle of the pitch and reads like a broken mail-merge.
+ */
+function tidy(body: string): string {
+  return body.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
@@ -176,19 +206,27 @@ export function renderContent(
     // 「その企業である理由」— 業種推定に基づく導入文 (l3_personalize)。
     reason: p.reason,
     industry: p.industry,
+    bookingUrl: s.bookingUrl,
     signature: buildSignature(),
     // Only render a phone line if a phone is configured (avoids a dangling label).
     senderPhoneLine: s.phone ? `\nTEL：${s.phone}` : '',
   };
 
   const subject = substitute(tpl.subject, vars);
-  // Fit the body to the target textarea: full text when it fits, otherwise the
-  // same text minus the `<!--optional-->` block. The signature is never dropped.
+  // Conditionals first, so a dropped block's placeholders never get substituted.
+  const rendered = substitute(applyConditionals(tpl.body, vars), vars);
+  // Fit the body to the target textarea by dropping optional tiers in order.
+  // The signature and the opt-out notice are outside every tier, so they survive
+  // any amount of shrinking; if even the smallest form does not fit, eligibility
+  // drops the company rather than letting the browser truncate mid-signature.
   const limit = messageLimit(schema);
-  const full = keepOptional(substitute(tpl.body, vars));
+  const shape = (tier: number) => tidy(fitOptional(rendered, tier));
+  const full = shape(0);
   let body = full;
-  if (limit && full.length > limit) {
-    body = stripOptional(substitute(tpl.body, vars));
+  for (let tier = 1; limit && body.length > limit && tier <= MAX_OPTIONAL_TIER; tier++) {
+    body = shape(tier);
+  }
+  if (body.length !== full.length) {
     log.warn(
       `message trimmed for ${company.name}: ${full.length} -> ${body.length} chars (maxlength=${limit})`,
     );
