@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { companies } from './db/repositories.js';
 import { ingestCsv, ingestCsvWithResolve, parseCompaniesCsv } from './layers/l0_list.js';
 import { resolveHomepage } from './layers/l0_homepage.js';
+import { discoverAndIngestCompanyRows } from './layers/l0_autodiscovery.js';
 import { discoverAndParse, buildPlan, runExecute, reparse } from './pipeline/pipeline.js';
 import { listPending, approve, reject, suppressCompany } from './pipeline/approval.js';
 import { exportReport, exportSuppression } from './layers/l6_record.js';
@@ -86,6 +87,60 @@ program
       const r = ingestCsv(o.out);
       console.log(`Ingested=${r.ingested} suppressed=${r.suppressed} skipped=${r.skipped}`);
     }
+  });
+
+program
+  .command('discover-auto')
+  .description('L0 autonomous discovery — generate candidate companies from search and ingest them')
+  .option('--query <query...>', 'custom search queries to use')
+  .option('--industry <industry...>', 'industry seed terms to build queries from')
+  .option('--prefecture <prefecture...>', 'prefecture seed terms to build queries from')
+  .option('--max-companies <n>', 'max companies to ingest', '200')
+  .option('--max-results <n>', 'max search results per query', '5')
+  .option('--query-delay <ms>', 'delay between search queries', '1200')
+  .option('--discover', 'run L1/L2 on newly ingested companies', false)
+  .option('--plan', 'run L3/L4 plan on parsed companies after discovery', false)
+  .option('--auto-high', 'auto-route gate=high companies to SUBMITTING during plan', false)
+  .action(async (o: {
+    query?: string[];
+    industry?: string[];
+    prefecture?: string[];
+    maxCompanies: string;
+    maxResults: string;
+    queryDelay: string;
+    discover: boolean;
+    plan: boolean;
+    autoHigh: boolean;
+  }) => {
+    const opts = {
+      queries: o.query,
+      industries: o.industry,
+      prefectures: o.prefecture,
+      maxCompanies: Number(o.maxCompanies),
+      maxResultsPerQuery: Number(o.maxResults),
+      queryDelayMs: Number(o.queryDelay),
+    };
+    const { rows, result } = await discoverAndIngestCompanyRows(opts);
+    console.log(`discovered ${rows.length} candidates; ingested=${result.ingested} suppressed=${result.suppressed} skipped=${result.skipped}`);
+
+    if (o.discover && result.companyIds.length > 0) {
+      log.info(`discovering ${result.companyIds.length} newly ingested companies`);
+      for (const id of result.companyIds) {
+        await discoverAndParse(id).catch((e) => log.error(`company ${id}: ${e.message}`));
+      }
+    }
+
+    if (o.plan) {
+      const parsed = result.companyIds
+        .map((id) => companies.byId(id))
+        .filter((c): c is NonNullable<ReturnType<typeof companies.byId>> => !!c && c.status === 'PARSED');
+      log.info(`planning ${parsed.length} companies (autoHigh=${o.autoHigh})`);
+      for (const c of parsed) {
+        await buildPlan(c.id, { autoHighGate: o.autoHigh }).catch((e) => log.error(`company ${c.id}: ${e.message}`));
+      }
+    }
+
+    printStatus();
   });
 
 program

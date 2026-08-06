@@ -91,6 +91,10 @@ export function candidateDomain(host: string): string {
   return SHARED_HOSTING.has(registrableDomain(h)) ? h : registrableDomain(h);
 }
 
+export function isBlockedDomain(host: string): boolean {
+  return isBlocked(registrableDomain(host));
+}
+
 /** Corporate-form suffixes/prefixes stripped to get the "core" brand name. */
 const LEGAL_TOKENS = [
   '株式会社', '有限会社', '合同会社', '合資会社', '合名会社', '一般社団法人', '一般財団法人',
