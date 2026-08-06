@@ -226,7 +226,7 @@ async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> 
         intake.current = `#${c.id} ${c.name}`;
         try {
           await discoverAndParse(c.id);
-          if (companies.byId(c.id)?.status === 'PARSED') await buildPlan(c.id);
+          if (companies.byId(c.id)?.status === 'PARSED') await buildPlan(c.id, { autoHighGate: true });
         } catch (e) {
           intake.logs.push({ company: `#${c.id} ${c.name}`, status: 'error', detail: (e as Error).message });
         }

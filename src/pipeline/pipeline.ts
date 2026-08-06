@@ -199,8 +199,11 @@ export async function buildPlan(companyId: number, opts: BuildPlanOptions = {}):
     detail: { gate: schema.gate, strategy: plan.strategy, confirm: plan.reachedConfirmScreen },
   });
 
-  // Gate routing (§5): high-gate + auto => direct to SUBMITTING; else approval.
-  if (opts.autoHighGate && schema.gate === 'high') {
+  const autoHighGate = opts.autoHighGate !== false;
+  // Gate routing (§5): high-gate forms with no sendability issues go straight to
+  // SUBMITTING by default. Forms with ambiguity or lower gate remain in approval
+  // review (PENDING_APPROVAL) so an operator can inspect them.
+  if (autoHighGate && schema.gate === 'high') {
     transition(company.id, 'SUBMITTING', { actor: 'auto', detail: 'auto high-gate' });
   } else {
     transition(company.id, 'PENDING_APPROVAL');

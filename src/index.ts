@@ -128,12 +128,13 @@ program
   .command('plan')
   .description('L3+L4(Plan) — build dry-run plans for PARSED companies')
   .option('-l, --limit <n>', 'max companies', '50')
-  .option('--auto-high', 'route gate=high straight to SUBMITTING (full-auto)', false)
-  .action(async (o: { limit: string; autoHigh: boolean }) => {
+  .option('--no-auto-high', 'do not route gate=high straight to SUBMITTING', false)
+  .action(async (o: { limit: string; noAutoHigh: boolean }) => {
     const batch = companies.byStatus('PARSED', Number(o.limit));
-    log.info(`planning ${batch.length} companies (autoHigh=${o.autoHigh})`);
+    const autoHigh = !o.noAutoHigh;
+    log.info(`planning ${batch.length} companies (autoHigh=${autoHigh})`);
     for (const c of batch) {
-      await buildPlan(c.id, { autoHighGate: o.autoHigh }).catch((e) =>
+      await buildPlan(c.id, { autoHighGate: autoHigh }).catch((e) =>
         log.error(`company ${c.id}: ${e.message}`),
       );
     }
