@@ -150,6 +150,8 @@ interface IntakeState {
   failed: number;
   excluded: number;
   logs: IntakeLog[];
+  /** Fatal error that ended the job early. Null on a clean run. */
+  error: string | null;
   startedAt: string;
   finishedAt: string | null;
 }
@@ -182,6 +184,7 @@ async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> 
     total: 0, done: 0, current: null,
     pendingApproval: 0, notFound: 0, failed: 0, excluded: 0,
     logs: [],
+    error: null,
     startedAt: new Date().toISOString(),
     finishedAt: null,
   };
@@ -239,12 +242,18 @@ async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> 
         intake.done++;
       }
     }
+  } catch (e) {
+    // Without this the job just flips to 完了 with every counter at 0 and the
+    // operator is told the list imported fine when nothing was written.
+    const msg = (e as Error).message;
+    log.error(`intake failed: ${msg}`);
+    if (intake) intake.error = msg;
   } finally {
     if (intake) {
       intake.phase = 'done';
       intake.running = false;
       intake.current = null;
-      intake.message = '完了';
+      intake.message = intake.error ? `失敗: ${intake.error}` : '完了';
       intake.finishedAt = new Date().toISOString();
     }
   }
@@ -257,7 +266,10 @@ async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> 
  */
 export function createServer() {
   const app = express();
-  app.use(express.json());
+  // 企業リストは JSON 本文としてまるごと POST される。express の既定上限 100kb は
+  // 日本語 CSV でおよそ 1,000 社で超え、取り込みが 413 (HTML のスタックトレース)
+  // で落ちる — 実運用のリストが通るサイズまで広げる。
+  app.use(express.json({ limit: '32mb' }));
 
   // Serve Plan screenshots (and any artifact) read-only.
   app.use('/artifacts', express.static(config.artifactsDir));
@@ -515,6 +527,22 @@ export function createServer() {
 
   app.get('/api/execute-all/status', (_req, res) => {
     res.json(bulk ?? { running: false });
+  });
+
+  // Body-parser failures (oversized list, truncated JSON) otherwise answer with an
+  // HTML stack trace, which the dashboard shows verbatim in a toast. Answer JSON
+  // with a message that says what to do about it.
+  app.use((err: Error & { type?: string; status?: number }, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(err);
+    if (err?.type === 'entity.too.large') {
+      log.error('リストが大きすぎます (413)');
+      return res.status(413).json({ error: 'リストが大きすぎます（1回あたり32MBまで）。分割して取り込んでください。' });
+    }
+    if (err?.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'リクエストの形式が不正です。' });
+    }
+    log.error(`unhandled: ${err?.message ?? err}`);
+    return res.status(err?.status ?? 500).json({ error: err?.message ?? 'サーバーエラー' });
   });
 
   return app;

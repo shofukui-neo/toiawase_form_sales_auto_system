@@ -190,7 +190,9 @@
         <p class="hint">
           フォーム送信の対象企業を取り込みます。1行 = 1社。<br>
           CSV（<code>会社名, Webサイト, 業種, 従業員規模, 都道府県, 出典</code> ／ 列順・ヘッダ有無は自動判定）または
-          会社名だけのリストに対応。SFA/CRM の書き出し（<code>電話・担当者・リードURL</code> 等の列を含むもの）は
+          会社名だけのリストに対応。Excel・スプレッドシートからの貼り付け（タブ区切り）、
+          Excel 書き出しの Shift_JIS ファイルもそのまま読めます。
+          SFA/CRM の書き出し（<code>電話・担当者・リードURL</code> 等の列を含むもの）は
           そのまま貼り付けて構いません — 企業の列だけを読み取ります。ドメインが無い行は「HP自動探索」で補完できます。
         </p>
         <div class="io-row">
@@ -278,7 +280,14 @@
 
     async function api(path, method='GET', body) {
       const res = await fetch(path,{ method, headers: body?{'content-type':'application/json'}:{}, body: body?JSON.stringify(body):undefined });
-      if(!res.ok){ throw new Error((await res.text())||res.status); }
+      if(!res.ok){
+        // The server answers errors as {error}; anything else (a proxy, an HTML
+        // stack trace) would otherwise be dumped raw into a toast.
+        const raw = await res.text();
+        let msg = raw;
+        try{ msg = JSON.parse(raw).error || raw; }catch{}
+        throw new Error(msg ? String(msg).slice(0,200) : `HTTP ${res.status}`);
+      }
       return res.headers.get('content-type')?.includes('json') ? res.json() : res.text();
     }
 
@@ -543,15 +552,44 @@
             + ` — 会社サイトではない列（リードURL等）を読んでいる可能性があります。取り込むと1社に統合されます。</span>`;
         }
         $('#previewbar').innerHTML = html;
-      }catch{ $('#previewbar').textContent=''; }
+      }catch(e){
+        // Silently blanking here hid the 413 on large lists — the operator saw an
+        // empty preview, pressed 取り込み開始, and got the same failure again.
+        $('#previewbar').innerHTML = `<span style="color:var(--danger)">プレビューできません: ${esc(String(e.message))}</span>`;
+      }
+    }
+
+    // Excel の「CSV (カンマ区切り)」書き出しは Shift_JIS(CP932)、「Unicode テキスト」は
+    // UTF-16LE。どちらも UTF-8 として読むと会社名が丸ごと文字化けし、そのまま
+    // 取り込まれてしまう（ヘッダも壊れるので列の対応も外れる）。BOM を見て、無ければ
+    // 厳密 UTF-8 を試し、失敗した時だけ Shift_JIS として読み直す。
+    function decodeList(buf){
+      const b = new Uint8Array(buf);
+      if(b[0]===0xEF && b[1]===0xBB && b[2]===0xBF)
+        return { text: new TextDecoder('utf-8').decode(b.subarray(3)), enc: 'UTF-8' };
+      if(b[0]===0xFF && b[1]===0xFE)
+        return { text: new TextDecoder('utf-16le').decode(b.subarray(2)), enc: 'UTF-16LE' };
+      if(b[0]===0xFE && b[1]===0xFF)
+        return { text: new TextDecoder('utf-16be').decode(b.subarray(2)), enc: 'UTF-16BE' };
+      try{
+        return { text: new TextDecoder('utf-8',{fatal:true}).decode(b), enc: 'UTF-8' };
+      }catch{
+        return { text: new TextDecoder('shift_jis').decode(b), enc: 'Shift_JIS' };
+      }
     }
 
     $('#csvfile').addEventListener('change', (e)=>{
       const f = e.target.files && e.target.files[0];
       if(!f) return;
       const reader = new FileReader();
-      reader.onload = () => { $('#importText').value = reader.result; $('#filename').textContent = `読み込み: ${f.name}`; runPreview(); };
-      reader.readAsText(f, 'utf-8');
+      reader.onload = () => {
+        const { text, enc } = decodeList(reader.result);
+        $('#importText').value = text;
+        $('#filename').textContent = `読み込み: ${f.name}（${enc}）`;
+        runPreview();
+      };
+      reader.onerror = () => toast('ファイルを読み込めませんでした');
+      reader.readAsArrayBuffer(f);
     });
     $('#importText').addEventListener('input', schedulePreview);
 
@@ -613,6 +651,10 @@
       }
 
       let extra = '';
+      if(s.error){
+        extra += `<div class="section-title" style="margin-top:14px;color:var(--danger)">取り込みに失敗しました</div>`
+          + `<div class="logbox"><div style="color:var(--danger)">${esc(s.error)}</div></div>`;
+      }
       if(s.collisions && s.collisions.length){
         extra += `<div class="section-title" style="margin-top:14px;color:var(--danger)">⚠ ドメイン重複（列の対応が誤っている可能性）</div>`
           + `<div class="logbox">${s.collisions.map(c=>`<div>${esc(c.domain)} — ${c.names.map(esc).join(' / ')}</div>`).join('')}</div>`;
@@ -629,8 +671,10 @@
 
       if(!s.running){
         btn.disabled = false;
-        $('#importMsg').textContent = `完了：取り込み ${s.ingested} 社`
-          + (s.pipeline ? ` / 承認待ち ${s.pendingApproval} 社` : '');
+        $('#importMsg').textContent = s.error
+          ? `失敗：${s.error}`
+          : `完了：取り込み ${s.ingested} 社`
+            + (s.pipeline ? ` / 承認待ち ${s.pendingApproval} 社` : '');
         $('#pendingPill').textContent = (parseInt($('#pendingPill').textContent)||0);
         loadCompanies();
       }
@@ -646,7 +690,9 @@
         if(!running){
           if(intakeTimer){ clearInterval(intakeTimer); intakeTimer=null; }
           await load();
-          toast(`取り込み完了：${s.ingested} 社` + (s.pipeline?` / 承認待ち ${s.pendingApproval} 社`:''));
+          toast(s.error
+            ? `取り込み失敗：${String(s.error).slice(0,90)}`
+            : `取り込み完了：${s.ingested} 社` + (s.pipeline?` / 承認待ち ${s.pendingApproval} 社`:''));
         }
         return running;
       };

@@ -49,8 +49,42 @@ export interface IngestResult {
  * exclusion wasn't a human/compliance decision). */
 const RETRYABLE_STATUSES = new Set(['FORM_NOT_FOUND', 'PARSE_FAILED']);
 
-/** Minimal CSV parser (handles quoted fields + commas inside quotes). */
+/** Field separators we accept, in tie-break order (comma wins a tie). */
+const DELIMITERS = [',', '\t', ';'] as const;
+
+/**
+ * Pick the field separator from the first record.
+ *
+ * A list pasted straight out of Excel / Google スプレッドシート is TAB-separated,
+ * and parsing it as comma-CSV puts the whole line into `name` — every row then
+ * looks like a company with no domain, so the whole list is skipped (or, with
+ * HP自動探索 on, searched under a garbage query). Counted outside quotes so a
+ * quoted `"株式会社サンプル, 東京"` cannot vote for comma.
+ */
+function detectDelimiter(text: string): string {
+  // Skip blank leading lines so an empty first spreadsheet row doesn't decide it.
+  const head = text.replace(/^(?:[^\S\r\n]*\r?\n)+/, '');
+  const counts = new Map<string, number>(DELIMITERS.map((d) => [d, 0]));
+  let inQuotes = false;
+  for (let i = 0; i < head.length; i++) {
+    const c = head[i];
+    if (c === '"') {
+      if (inQuotes && head[i + 1] === '"') i++;
+      else inQuotes = !inQuotes;
+    } else if (!inQuotes) {
+      if (c === '\n' || c === '\r') break;
+      const n = counts.get(c);
+      if (n !== undefined) counts.set(c, n + 1);
+    }
+  }
+  let best: string = DELIMITERS[0];
+  for (const d of DELIMITERS) if (counts.get(d)! > counts.get(best)!) best = d;
+  return best;
+}
+
+/** Minimal CSV parser (handles quoted fields + separators inside quotes). */
 function parseCsv(text: string): string[][] {
+  const delim = detectDelimiter(text);
   const rows: string[][] = [];
   let field = '';
   let row: string[] = [];
@@ -65,7 +99,7 @@ function parseCsv(text: string): string[][] {
         } else inQuotes = false;
       } else field += c;
     } else if (c === '"') inQuotes = true;
-    else if (c === ',') {
+    else if (c === delim) {
       row.push(field);
       field = '';
     } else if (c === '\n' || c === '\r') {

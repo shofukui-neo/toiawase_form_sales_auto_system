@@ -1,5 +1,6 @@
-import * as cheerio from 'cheerio';
+import * as cheerio from 'cheerio/slim';
 import { searchWeb, type SearchResult } from './websearch.js';
+import { fetchPage } from '../utils/http.js';
 import { normalizeDomain } from '../utils/url.js';
 import { logger } from '../utils/logger.js';
 
@@ -20,9 +21,6 @@ import { logger } from '../utils/logger.js';
  */
 
 const log = logger('L0-hp');
-
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 /** Registrable domains that are never a company's own site. */
 const BLOCK_DOMAINS = new Set([
@@ -116,23 +114,8 @@ function longestKanjiRun(s: string): string {
   return runs.sort((a, b) => b.length - a.length)[0] || '';
 }
 
-async function fetchHtml(url: string, timeoutMs = 12000): Promise<{ status: number; html: string; finalUrl: string } | null> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', 'Accept-Language': 'ja,en;q=0.8' },
-    });
-    const html = await res.text();
-    return { status: res.status, html, finalUrl: res.url || url };
-  } catch (e) {
-    log.debug(`fetch failed ${url}: ${(e as Error).message}`);
-    return null;
-  } finally {
-    clearTimeout(t);
-  }
+function fetchHtml(url: string, timeoutMs = 12000): Promise<{ status: number; html: string; finalUrl: string } | null> {
+  return fetchPage(url, { timeoutMs });
 }
 
 export interface ResolveHints {

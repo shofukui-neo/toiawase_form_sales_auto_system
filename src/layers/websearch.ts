@@ -1,4 +1,5 @@
-import * as cheerio from 'cheerio';
+import * as cheerio from 'cheerio/slim';
+import { fetchPage } from '../utils/http.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -13,9 +14,6 @@ import { logger } from '../utils/logger.js';
 
 const log = logger('websearch');
 
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-
 export interface SearchResult {
   title: string;
   url: string;
@@ -28,26 +26,9 @@ export type SearchProvider = (query: string) => Promise<SearchResult[]>;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function fetchText(url: string, timeoutMs = 12000): Promise<string | null> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: 'follow',
-      headers: {
-        'User-Agent': UA,
-        Accept: 'text/html,application/xhtml+xml',
-        'Accept-Language': 'ja,en;q=0.8',
-      },
-    });
-    if (res.status >= 400) return null;
-    return await res.text();
-  } catch (e) {
-    log.debug(`fetch failed ${url}: ${(e as Error).message}`);
-    return null;
-  } finally {
-    clearTimeout(t);
-  }
+  const page = await fetchPage(url, { timeoutMs });
+  if (!page || page.status >= 400) return null;
+  return page.html;
 }
 
 /** DuckDuckGo wraps outbound links in a redirect carrying the real URL in `uddg`. */

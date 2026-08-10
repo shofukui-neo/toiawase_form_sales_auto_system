@@ -1,14 +1,12 @@
-import * as cheerio from 'cheerio';
+import * as cheerio from 'cheerio/slim';
 import { XMLParser } from 'fast-xml-parser';
 import { baseUrl, normalizeDomain, resolveUrl, sameSite } from '../utils/url.js';
 import { BrowserSession } from '../browser/browser.js';
 import { extractFields } from '../browser/extract.js';
+import { fetchPage as httpFetchPage } from '../utils/http.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L1');
-
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 /** 1. Common contact paths, cheapest first (spec §4-L1 step 1). */
 const COMMON_PATHS = [
@@ -40,22 +38,8 @@ interface FetchedPage {
 }
 
 async function fetchPage(url: string, timeoutMs = 12000): Promise<FetchedPage | null> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' },
-    });
-    const html = await res.text();
-    return { url: res.url || url, status: res.status, html };
-  } catch (e) {
-    log.debug(`fetch failed ${url}: ${(e as Error).message}`);
-    return null;
-  } finally {
-    clearTimeout(t);
-  }
+  const page = await httpFetchPage(url, { timeoutMs });
+  return page && { url: page.finalUrl, status: page.status, html: page.html };
 }
 
 interface FormSignals {

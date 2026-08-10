@@ -70,3 +70,42 @@ test('英語ヘッダも従来どおり動く', () => {
   assert.equal(normalizeDomain(rows[0].domain), 'acme.example.com');
   assert.equal(rows[0].employees, 320);
 });
+
+/**
+ * Excel / Google スプレッドシート からコピーした貼り付けはタブ区切り。カンマCSV
+ * として読むと行まるごとが会社名になり、ドメインが全て空 → 全件スキップ（HP自動
+ * 探索がオンなら壊れたクエリで検索）となって取り込みが成立しない。
+ */
+test('スプレッドシート貼り付け（タブ区切り）を取り込める', () => {
+  const rows = parseCompaniesCsv('会社名\tWebサイト\t業種\n株式会社アルファ\talpha.co.jp\tIT\n有限会社ベータ\tbeta.jp\t製造');
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.name), ['株式会社アルファ', '有限会社ベータ']);
+  assert.deepEqual(rows.map((r) => r.domain), ['alpha.co.jp', 'beta.jp']);
+  assert.equal(rows[0].industry, 'IT');
+});
+
+test('タブ区切り・ヘッダ無しも位置指定で読む', () => {
+  const rows = parseCompaniesCsv('株式会社アルファ\talpha.co.jp\n有限会社ベータ\tbeta.jp');
+  assert.deepEqual(rows.map((r) => r.name), ['株式会社アルファ', '有限会社ベータ']);
+  assert.deepEqual(rows.map((r) => r.domain), ['alpha.co.jp', 'beta.jp']);
+});
+
+test('区切り文字の判定は引用符の中のカンマに釣られない', () => {
+  const rows = parseCompaniesCsv('"会社名"\t"Webサイト"\n"株式会社アルファ, 東京"\talpha.co.jp');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, '株式会社アルファ, 東京');
+  assert.equal(rows[0].domain, 'alpha.co.jp');
+});
+
+test('カンマCSVはタブ混入があってもカンマ区切りのまま', () => {
+  const rows = parseCompaniesCsv('会社名,Webサイト\n株式会社アルファ\t,alpha.co.jp');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, '株式会社アルファ');
+  assert.equal(rows[0].domain, 'alpha.co.jp');
+});
+
+test('社名だけの1列リストは区切り文字判定の影響を受けない', () => {
+  const rows = parseCompaniesCsv('株式会社アルファ\n有限会社ベータ\n合同会社ガンマ');
+  assert.deepEqual(rows.map((r) => r.name), ['株式会社アルファ', '有限会社ベータ', '合同会社ガンマ']);
+  assert.ok(rows.every((r) => r.domain === ''));
+});
