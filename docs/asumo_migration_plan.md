@@ -1,464 +1,603 @@
 # フォーム送信機構 ASUMO 移植 計画書
 
-**作成日**: 2026-08-17 ／ **改訂**: 2026-08-17（rev.2 — ASUMO 実装レビュー反映）
-**移植元**: `toiawase_form_sales_auto_system`（Node CLI + Express / 生SQL better-sqlite3 / 実装 7,703行）
-**移植先**: ASUMO（Next.js 16 App Router + React 19 / Drizzle + better-sqlite3 / Fly.io）
-**移植範囲**: L1〜L5 + 承認ダッシュボード（L0 リスト生成は対象外＝ASUMO 既存資産を使う）
+**改訂**: rev.4（第2回レビュー N1–N13 反映）
+**移植元**: `toiawase_form_sales_auto_system`（Node CLI + Express / 7,703行）
+**移植先**: ASUMO（Next.js 16 / Drizzle + better-sqlite3 / Fly.io shared-cpu-1x 1GB）
 
-> **rev.2 での変更点**: 初版は「ASUMO プロセス内で Playwright を動かす」前提で組んでいたが、
-> これは成立しない（§1）。ブラウザ層を手元PC側ワーカーへ分離する構成に組み替えた。
-> あわせて、初版が「要確認」としていた 6 項目に既存実装上の答えがあることを反映し、
-> 安全機構の案A/案B比較（初版 §5）は決着済みのため削除した。
+> **改訂履歴**
+> - **rev.1** — ASUMO 内で Playwright を動かす前提。**誤り**（B1）。
+> - **rev.2** — ブラウザ層をワーカーへ分離。`utils/http.ts` をワーカーへ移すとしたのは**誤り**（F4）。
+> - **rev.3** — B1–B3 / W1–W3 / F1–F8 反映。ただし `markSent` を `sf_exclusions` へ移したのは
+>   **誤り**。W2（営業お断り検知の登録先）の話を送信済み台帳まで拡張した結果、
+>   **C6 が routine な CSV 取込で無音で壊れる**構造になっていた（N1）。
+> - **rev.4（本版）** — N1 を rev.1 の判断へ差し戻し。Phase A を具体化、Phase 5 を 5a/5b に分割、
+>   ASUMO 固有の関門（§8）と「門番」列（§9）を新設。
 >
-> 本改訂は ASUMO 側コードのレビュー指摘（`polite.ts:15` / `prospect/observe.ts:9` /
-> `リスト作成機能_移植_20260811.md:101` / `form-outreach/page.tsx:5` / `outreach.impl.ts:651` /
-> `company-reset.test.ts:214` / `sf-exclusion.ts:21,202` / `gemini.ts` / `registry.ts` / `cache.ts:5`）
-> を**確定事実として受け入れて**書いている。本計画書の作成者は ASUMO リポジトリを直接読んでいない。
+> 本計画書の作成者は ASUMO リポジトリを直接読んでいない。file:line はすべてレビューの記載を
+> 確定事実として受け入れている。
 
 ---
 
-## 0. この移植の一行要約
+## 0. 一行要約
 
-「**フォームURL → 解析 → 文面生成 → 入力 → 人が承認 → 送信 → 結果判定**」という機構のうち、
-**判断・データ・画面は ASUMO に、ブラウザ操作だけを手元PC側のワーカーに**置く。
+**判断・データ・画面・Web 取得は ASUMO に、ブラウザ操作だけを手元PC側ワーカーに**置く。
+C1（Plan はセッションを保持しない）により、解析・Plan・Execute はもともと独立した 3 セッションであり、
+その境目にプロセス境界を置く追加コストはゼロである。
 
-ブラウザを分離しても機構は劣化しない。現行設計の C1（Plan はセッションを保持しない）により、
-**解析・Plan・Execute はもともと 3 つの独立したブラウザセッション**であり、その境目に
-プロセス境界を置く追加コストはゼロだからである。
+**D1（ASUMO が送信主体になってよいか）が未決でも、11〜15日ぶんの作業が動く**：
+Phase A（フォーム URL 精度）→ Phase 1（純ロジック）→ Phase 5a（確認 UI）。
+どれも「担当者が手で送る」現行フローのまま価値が出る（N7）。
+
+| 分類 | 行数 | 割合 |
+|---|---:|---:|
+| ASUMO へ（純ロジック・無改造） | 約 2,340 | 30% |
+| ワーカーへ | 約 1,150 | 15% |
+| 書き換え | 約 1,230 | 16% |
+| 作り直し | 約 1,730 | 22% |
+| 移植しない | 約 1,410 | 17% |
 
 ---
 
-## 1. 前提の訂正：ASUMO 本番に Chromium は載らない
-
-初版はこれを「設定で解決できるビルドの問題」（初版 R1）として扱っていた。誤りである。
+## 1. 前提：ASUMO 本番に Chromium は載らない（B1）
 
 | 事実 | 出典 |
 |---|---|
-| Fly の shared-cpu-1x / 1GB に Chromium は載らない | `polite.ts:15` |
-| 同旨（候補企業の巡回でブラウザを使わない理由） | `prospect/observe.ts:9` |
-| **同じ形の移植で既に一度この判断を下している** | `リスト作成機能_移植_20260811.md:101` |
-| `auto_stop_machines = "suspend"` / `min_machines_running = 0` | fly.toml |
+| 「Fly の shared-cpu-1x / 1GB に Chromium は載らない。JS でしか出ない情報は asumo では取らない」 | `lib/fetchx/polite.ts:15` |
+| 同旨 | `lib/prospect/observe.ts:9` |
+| **同じ形の移植で既に一度この判断をしている** | `docs/リスト作成機能_移植_20260811.md:101` |
+| `shared-cpu-1x` / `memory = "1gb"` / `auto_stop_machines = "suspend"` / `min_machines_running = 0` | `fly.toml` |
+| `node:22-slim` に `python3 make g++` のみ。Chromium も `playwright install` も無い（+500MB〜1GB） | `Dockerfile` |
 
-初版の R1/R5 は開発機の話に閉じており、本番の話が無かった。加えて最後の 1 行は独立した問題を生む：
-**マシンが停止している状態では、3時間毎・30分毎の無人ジョブが起きる保証がない。**
-初版 §4-1 の自律ジョブ計画は、この 1 点だけでも成立しない。
+`auto_stop_machines = "suspend"` / `min_machines_running = 0` は **HTTP リクエストが無ければマシンが止まる**
+という意味であり、rev.1 の「3時間毎」「30分毎」の自律ジョブは起きる保証がない。
 
-### 1-1. 帰結：ワーカーが引きに来る（push ではなく pull）
-
-ブラウザを手元PC側ワーカーに置くと、上の 2 つの問題が同時に解ける。
-
-- ブラウザは 1GB 制約の外で動く
-- **ワーカーの HTTP 要求そのものが Fly マシンを起こす**ので、ASUMO 側にスケジューラが要らない
-
-したがって ASUMO 側には**ブラウザ関連の自律ジョブを一切登録しない**。ワーカーが
-「作業をください」と定期的に問い合わせ、ASUMO が渡せる仕事を返す。スケジューリングの
-責任はワーカー側にある。
+**帰結：ワーカーが引きに来る（pull）。** ブラウザは 1GB 制約の外で動き、ワーカーの HTTP 要求そのものが
+Fly マシンを起こすので ASUMO 側にスケジューラが要らない。
 
 ---
 
-## 2. プロセス境界の引き方
+## 2. プロセス境界
 
-境界は「ブラウザが要るか」で引く。**判断は一切ワーカーに渡さない。**
+境界は「ブラウザが要るか」で引く。**判断も Web 取得もワーカーに渡さない。**
 
 ```
-┌─ ASUMO (Fly) ────────────────────────┐      ┌─ ワーカー (手元PC / Chromium可の実行環境) ─┐
-│                                       │      │                                            │
-│  項目→ロール マッピング (mapFields)   │      │  ブラウザセッション                        │
-│  ゲート判定 / 適格性判定              │      │  DOM 抽出 (extract)                        │
-│  文面生成 / 署名 / 値解決             │      │  打鍵・クリック・スクショ                  │
-│  カバレッジ予測                       │◀────▶│  静的クロール (L1 候補収集)                │
-│  結果判定 (L5 の判定ロジック)         │ HTTP │                                            │
-│  抑制・ペーシング・承認・権限         │      │  ※ 判断はしない。観測と実行のみ            │
-│  DB / 画面 / 操作ログ                 │      │                                            │
-└───────────────────────────────────────┘      └────────────────────────────────────────────┘
+┌─ ASUMO (Fly) ─────────────────────────┐      ┌─ ワーカー (手元PC) ──────────────┐
+│  項目→ロール マッピング (mapFields)   │      │  ブラウザセッション              │
+│  ゲート判定 / 適格性判定              │      │  DOM 抽出 (extract)              │
+│  文面生成 / 署名 / 値解決             │ HTTP │  打鍵・クリック・スクショ        │
+│  カバレッジ予測 / 結果判定            │◀────▶│  L1 の描画フォールバックのみ     │
+│  抑制・ペーシング・承認・権限         │      │                                  │
+│  ★ 全ての Web 取得 (polite)           │      │  ※ 判断も静的取得もしない        │
+│  ★ L1 の静的段階                      │      │                                  │
+└───────────────────────────────────────┘      └──────────────────────────────────┘
 ```
 
-### 2-1. やり取りする 3 つの往復
+> `lib/fetchx/polite.ts:4` — 「★ **全てのWeb取得はここを通す。** poc で合法性と安定性を担保していたのは
+> この1点で、**迂回する取得コードを1本でも書いた時点で設計が崩れる**」
 
-現行の `parseForm` / `planSubmission` / `executeSubmission` が既に 3 つの独立セッションなので、
-**そのまま 3 つの往復になる**。設計を曲げていない。
+- **L1 の静的 3 段階は ASUMO 側で `polite()` の上に書き直す**
+- **`utils/http.ts` は移植しない。** ワーカー側に第二の取得経路を作らない（F4）
+- ワーカーが開くのは **ASUMO が polite で収集して渡した候補 URL** のみ
 
-| # | ワーカー → ASUMO | ASUMO の処理 |
-|---|---|---|
-| 1. 観測 | `DetectedField[]` / ボタン / CAPTCHA種別 / 可視テキスト / formSelector | `mapFields` → ゲート → 営業お断り検知 → 適格性 → `FormSchema` を保存 |
-| 2. Plan | スクショ / 確認画面到達可否 / 使った戦略 | `form_submissions` に plan_ready を作成 → 承認待ちへ |
-| 3. Execute | `finalUrl` / 可視テキスト / 残存フォーム数 | `judgeResult` で成功・失敗・CAPTCHA・要確認を判定 → 状態遷移 → 送信済み記録 |
-
-**ASUMO → ワーカー**へ渡すのは、往復2・3では `FormSchema` と**解決済みのロール別入力値**。
-ワーカーは値を作らず、渡された文字列を打つだけ。
-
-> **これが C4（プレビュー == 実際に入る値）を構造的に保証する。**
-> 文面描画と値解決が ASUMO 側にしか存在しないので、承認画面が見せた値と
-> ワーカーが打つ値が原理的に一致する。初版のように両側で同じ純ロジックを
-> 二重に持つ設計だと、この一致は「同じコードをコピーし続ける」運用でしか守れない。
-
-### 2-2. ワーカーの設置形態
-
-- 実行環境: 手元PC（営業担当 or 運用者の端末）。Chromium が動けば何でもよい
-- 起動: 常駐 or 業務時間中のみ。**送信可能時間帯（9–19時）と揃えるなら常駐は不要**
-- 認証: ASUMO へのアクセスはワーカー専用トークン。**これが無いと外部から送信を起こせてしまう**（R3）
-- 資格情報: ワーカーは送信者情報を持たない（値は ASUMO から渡ってくる）。
-  持つのは ASUMO の URL とトークンだけ
+**ワーカーは値を作らない。** 渡された文字列を打つだけ。これが C4（プレビュー == 実際に入る値）を
+構造的に保証する — 文面描画と値解決が ASUMO 側にしか存在しないため。
 
 ---
 
-## 3. 移植対象の棚卸し（rev.2）
-
-初版は「ASUMO へ」の 1 宛先で分類していたが、宛先が 2 つになったので切り直した。
-
-| 分類 | 行数 | 割合 | 内容 |
-|---|---:|---:|---|
-| ASUMO へ（純ロジック・無改造） | 約 2,340 | 30% | 解析マッピング・文面・カバレッジ・ゲート・適格性・結果判定 |
-| ワーカーへ（無改造） | 約 1,260 | 16% | ブラウザセッション・DOM抽出・打鍵/送信機構・静的クロール |
-| 書き換え | 約 1,000 | 13% | DB層・状態機械・パイプライン・LLM 呼び出し |
-| 作り直し | 約 1,730 | 23% | 承認ダッシュボード・CLI |
-| 移植しない | 約 1,320 | 17% | L0 リスト生成・L6 レポート |
+## 3. 移植対象の棚卸し
 
 ### 3-1. ASUMO へ（純ロジック・無改造）— 約 2,340行
 
-| 現行ファイル | 行数 | ASUMO での配置 |
-|---|---:|---|
-| `types.ts` | 179 | `lib/formsend/types.ts` |
-| `layers/l2_parsing.ts`（`mapFields` 部） | 約 190 | `lib/formsend/parse/map.ts` |
-| `layers/l2_dictionary.ts` | 184 | `lib/formsend/parse/dictionary.ts` |
-| `layers/l2_split.ts` | 366 | `lib/formsend/parse/split.ts` |
-| `layers/l2_choice.ts` | 155 | `lib/formsend/parse/choice.ts` |
-| `layers/l3_content.ts` | 401 | `lib/formsend/content/render.ts` |
-| `layers/l3_personalize.ts` | 172 | `lib/formsend/content/personalize.ts` |
-| `layers/fillPolicy.ts` | 81 | `lib/formsend/content/fill-policy.ts` |
-| `layers/coverage.ts` | 200 | `lib/formsend/coverage.ts` |
-| `core/gate.ts` | 109 | `lib/formsend/gate.ts` |
-| `crosscutting/eligibility.ts` | 102 | `lib/formsend/eligibility.ts` |
-| `layers/l5_result.ts`（判定部） | 約 80 | `lib/formsend/judge.ts` |
-| `crosscutting/compliance.ts`（`detectNoSalesPolicy` のみ） | 約 25 | `lib/formsend/no-sales.ts` |
-| `utils/url.ts` + `config.ts` の `splitAddress` | 約 70 | `lib/formsend/utils/` |
+`types.ts` 179 ／ `mapFields` 部 約190 ／ `l2_dictionary.ts` 184 ／ `l2_split.ts` 366 ／
+`l2_choice.ts` 155 ／ `l3_content.ts` 401 ／ `l3_personalize.ts` 172 ／ `fillPolicy.ts` 81 ／
+`coverage.ts` 200 ／ `gate.ts` 109 ／ `eligibility.ts` 102 ／ `l5_result.ts` 判定部 約80 ／
+`detectNoSalesPolicy` 約25 ／ `url.ts` + `splitAddress` 約70。
 
-**`judge.ts` は要リファクタ**（軽微）。現行は `Page` を受け取るので、
-`{ finalUrl, visibleText, formCount, beforeUrl, captchaPresent }` を受ける純関数に変える。
-判定ロジック自体は変えない。
+配置は `lib/formsend/`。**他モジュールを import しない**制約を lint で固定（`lib/icp` / `lib/fetchx` と同じ作法）。
+例外は `polite()`・`isSuppressed`・`setStatus`・`toUserMessage`・`idempotencyKey` のみ。
 
-### 3-2. ワーカーへ（無改造）— 約 1,260行
+`judge.ts` は `Page` 依存を外し `{ finalUrl, visibleText, formCount, beforeUrl, captchaPresent }` を
+受ける純関数にする（判定ロジックは変えない）。
+
+### 3-2. ワーカーへ — 約 1,150行
 
 | 現行ファイル | 行数 | 備考 |
 |---|---:|---|
 | `browser/browser.ts` | 111 | セッション・人間らしい打鍵・決定論的ジッタ |
 | `browser/extract.ts` | 282 | DOM 抽出。**ハニーポット判定・必須バッジ検知はここ**（C5 の実装点） |
-| `layers/l4_submit.ts` | 423 | 入力・確認クリック・最終送信の機構 |
-| `layers/l1_discovery.ts` | 240 | 静的クロール + ブラウザ描画フォールバック |
-| `utils/{http,crash_guard,logger}.ts` | 172 | HTTPスタック・クラッシュ防御 |
-| （新規）ポーラ + ASUMO クライアント | 約 200 | 作業取得・結果返却・リトライ |
+| `l4_submit.ts` | 423 | 入力・確認クリック・最終送信の機構 |
+| `l1_discovery.ts` の `browserConfirm` 部 | 約50 | 描画フォールバックのみ |
+| `crash_guard.ts` + `logger.ts` | 83 | Playwright 由来の非同期例外対策 |
+| （新規）ポーラ + クライアント | 約200 | 作業取得・結果返却・リトライ・バックオフ |
 
-**`utils/http.ts` はワーカー側へ移すことで、初版 R2（`setGlobalDispatcher` が ASUMO の
-`polite.ts` クローラと衝突する）が消える。** undici 8 を明示的に噛ませる目的
-（undici 7 のパーサ assert でプロセスごと落ちる事故への対策）はワーカー内で完結する。
+### 3-3. 書き換え — 約 1,230行
 
-### 3-3. 書き換え — 約 1,000行
-
-| 現行ファイル | 行数 | 書き換え理由 |
-|---|---:|---|
-| `config.ts` | 164 | `SENDER_*` env → ASUMO の設定/社員マスタ由来へ（D2） |
-| `db/db.ts` + `repositories.ts` | 294 | 生 SQL → Drizzle（§4） |
-| `core/stateMachine.ts` | 58 | `form_targets.status` + 工程反映 |
-| `crosscutting/compliance.ts` | 54 → 約5 | `preSendCheck` は `isSuppressed({ channel: "form" })` の 1 行になる（§5） |
-| `crosscutting/pacing.ts` | 46 | 送信ハンドアウト時の判定へ |
-| `pipeline/pipeline.ts` | 268 | 3ステージ → ワーカーへのハンドアウト API + server action |
-| `pipeline/approval.ts` | 118 | server action へ。承認は `authz.ts` の権限判定を通す |
-| `layers/l2_llm.ts` | 87 | Anthropic SDK 直呼び → `gemini.ts`（§6） |
+`l1_discovery.ts` 静的段階 約190（**`polite()` 化・§10 Phase A**）／ `config.ts` 164（D4）／
+`db/*` 294（Drizzle）／ `stateMachine.ts` 58（`setStatus` 経由）／ `compliance.ts` 54→約5 ／
+`pacing.ts` 46 ／ `pipeline.ts` 268 ／ `approval.ts` 118（`authz` 経由）／ `l2_llm.ts` 87（`gemini.ts`）。
 
 ### 3-4. 作り直し / 移植しない
 
-作り直し（約 1,730行）: `web/server.ts` 557 ／ `web/dashboard.html` 754 ／ `web/review.ts` 109 ／ `index.ts` 313。
+**作り直し 約1,730行**: `web/server.ts` 557 ／ `dashboard.html` 754 ／ `review.ts` 109 ／ `index.ts` 313。
 
-移植しない（約 1,320行）: `l0_list.ts` 440 ／ `l0_homepage.ts` 347 ／ `l0_autodiscovery.ts` 192 ／
-`websearch.ts` 169 ／ `l6_record.ts` 76 ／ `l6_sheets.ts` 94 ／ `config/icp.json`。
-いずれも ASUMO の ①リストインポート・`prospect-*`・`/usage` が代替する。
+**移植しない 約1,410行**: `l0_list.ts` 440 ／ `l0_homepage.ts` 347 ／ `l0_autodiscovery.ts` 192 ／
+`websearch.ts` 169 ／ `l6_record.ts` 76 ／ `l6_sheets.ts` 94 ／ `config/icp.json` ／ `utils/http.ts` 89（F4）。
 
 ---
 
 ## 4. データ層
 
-### 4-1. 列名は `company_id`（確定・厳守）
-
-初版は「`customer_id` にして、`TARGETS` 検出が対応しているか要確認」と書いた。**誤り。**
-
-`company-reset.test.ts:214` は**列名リテラル照合**である。したがって：
-
-> `customer_id` で作ると、**検出網にかからないままテストは緑になり、消し漏れが通る。**
-
-要確認事項ではなく、失敗が沈黙する種類の罠である。**全 `form_*` テーブルの外部キー列は
-`company_id` で作る**こと、そして `lib/company-reset.ts` の `TARGETS` へ登録することを
-Phase 3 の必須条件とする。
-
-### 4-2. テーブル設計
-
-企業マスタは二重に持たない。ASUMO の企業マスタを正とし、フォーム送信固有のデータだけを持つ。
-
-| 現行テーブル | ASUMO |
-|---|---|
-| `companies` | **作らない**。`status`/`form_url` は `form_targets` へ分離 |
-| `field_maps` | `form_schemas`（`company_id`, `schema_json`, `gate`, `mapping_confidence`, `has_captcha`, `has_confirm_screen`） |
-| `submissions` | `form_submissions`（`company_id`, `content_rendered`, `plan_screenshot_key`, `status`, `approved_by/at`, `submitted_at`, `result_detail`） |
-| `content_overrides` | `form_content_overrides`（`company_id` PK, `overrides_json`） |
-| `suppression` | **作らない**。`sf-exclusion` の台帳を使う（§5） |
-| `send_ledger` | `form_send_ledger`（`company_id`, `day`, `sent_at`） |
-| `audit_log` | `op_logs` + 企業イベント |
-| （新規） | `form_targets`（`company_id` PK, `form_url`, `form_confidence`, `status`, `lease_token`, `leased_until`, `updated_at`） |
-
-`lease_token` / `leased_until` は**ワーカーへの作業ハンドアウト用**。複数ワーカーや
-再送で同じ企業が二重に処理されるのを防ぐ（R4）。
-
-`schema_json` は JSON を text で保持。Postgres 移行時に jsonb へ移せるよう、
-アプリ側は必ずパーサ経由で読む（生 SQL で JSON 演算子を使わない）。
-
-### 4-3. Plan スクショの保持ポリシー（初版の欠落）
-
-初版はスクショの置き場だけ書き、**保持期間も総量上限も書いていなかった**。
-`cache.ts:5` が「volume を埋めて DB の書き込みが失敗する」罠を明記しているにもかかわらずである。
-
-必要なもの：
-
-- **保持期間**: 送信完了 or 除外から N 日で削除（既定 30 日を提案）
-- **総量上限**: LRU で上限超過分を削除（`SCRAPE_CACHE_MAX_MB` と同じ考え方）
-- **掃除の実行主体**: ASUMO 側の軽量ジョブ（ブラウザ不要なので `registry.ts` に載せられる）
-- スクショはフルページ PNG で 1 枚あたり数百 KB〜数 MB になる。**上限なしは volume 枯渇と同義**
-
----
-
-## 5. 抑制：既存台帳を呼ぶだけ（初版 §5 は削除）
-
-初版は案A（engine 完結）／案B（ASUMO 統合）を比較したが、**この論争は決着済みだった。**
+### 4-1. 列名は `company_id`（B3・確定）
 
 | 事実 | 出典 |
 |---|---|
-| `SUPPRESSION_CHANNELS` に `form` が列挙済み | `sf-exclusion.ts:21` |
-| 架電/メール/DM/フォームの全経路がここを必ず通る | `sf-exclusion.ts:202` |
-| 回帰テスト 273 行が既に存在 | 同テスト |
+| `columnsOf(name).includes("company_id")` の総当たり | `tests/company-reset.test.ts:214` |
+| `customers.companyId = text("company_id")`（`K000001`）。**全 70 テーブルがこの命名** | `lib/db/schema.ts:7` |
+| 「足し忘れは company_id 列の総当たりで検出する」 | `lib/company-reset.ts:88` |
 
-したがって：
+`customer_id` で作ると**検出網にかからないまま消し漏れが通る — テストは緑のまま**。
 
-- `preSendCheck` → **`isSuppressed({ ..., channel: "form" })` を呼ぶだけ**。Port の読み側は実装不要
-- `markSent` → 同じ台帳へ `channel: "form"` で書く（`:202` の「全経路が必ず通る」に従う）
-- 初版が提案した `SuppressionPort` インタフェースも `form_suppression` テーブルも**不要**
+### 4-2. テーブル
 
-engine 側に残すのは**送信時間帯・日次上限・送信間隔**だけ。これはフォーム送信固有のマナーで、
-ASUMO の他経路と共有すべき値ではない（既定値の是非は D3）。
+| 現行 | ASUMO |
+|---|---|
+| `companies` | **作らない**。`customers` が正（`company_identity_keys` の名寄せ込み） |
+| `field_maps` | `form_schemas`（`company_id`, `schema_json`, `gate`, `mapping_confidence`, `has_captcha`, `has_confirm_screen`） |
+| `submissions` | `form_submissions`（`company_id`, `content_rendered`, `plan_screenshot_key`, `status`, `approved_by/at`, `submitted_at`, `result_detail`） |
+| `content_overrides` | `form_content_overrides`（`company_id` PK） |
+| `suppression` | **読みは `sf_exclusions`（`isSuppressed`）／ 書きは下記 2 表**（§5・N1） |
+| `send_ledger` | **`form_send_ledger`（`company_id`, `day`, `sent_at`）— C6 の担保。移植する** |
+| `audit_log` | `op_logs` + `board_events` |
+| （新規） | `form_targets`（`company_id` PK, `form_url`, `form_confidence`, `status`, `lease_token`, `leased_until`） |
 
----
+- 全 `form_*` を `lib/company-reset.ts` の `TARGETS` に登録する
+- **`sf_exclusions` は TARGETS に入れない**（`lib/company-reset.ts:9`：法務リスクの最終防衛線）
+- `schema_json` は text 保持。Postgres 移行時に jsonb へ移せるよう、生 SQL で JSON 演算子を使わない
 
-## 6. LLM：参照先が違っていた
+**`form_targets.status`** は現行の状態機械を移植したもの。rev.4 で 1 状態を追加する：
 
-初版 §4-5 は `lib/external.ts` を差し替え先として指したが、**これは外部連携のスタブ・ファサード**であり、
-LLM の実装ではない。正しい参照先は `gemini.ts`。
-
-あわせて初版 R6（「Gemini が JSON 以外を返すリスク」）も**解決済み**である。
-`gemini.ts` の `responseSchema` でスキーマが強制されるため、現行の
-「JSON のみを返せ」というプロンプト頼みの構造ごと不要になる。
-
-- `classifyAmbiguousFields` を `gemini.ts` 経由に変更し、ロール分類の `responseSchema` を定義
-- 予算キャップは ASUMO の作法（`JOBS_AICAP_*`）に合わせる
-- 失敗・未設定時は**必ずルールのみで続行**（現行の挙動を維持）
-
----
-
-## 7. 壊してはいけない設計制約
-
-移植中に「動かすこと」を優先して踏み潰しやすい制約。**ここを崩すと機構は動くがブランドが燃える。**
-
-| # | 制約 | rev.2 での実装点 |
+| 状態 | 意味 | 画面での扱い |
 |---|---|---|
-| C1 | Plan はセッションを保持しない | ワーカー側 `finally { session.close() }`。**この制約こそがプロセス境界を無コストにしている** |
-| C2 | Plan は最終送信ボタンを押さない | ワーカー側。`confirm` 種別のみクリック |
-| C3 | 値を捏造しない | ASUMO 側。未設定の送信者情報は空のまま → 適格性で除外 |
-| C4 | プレビュー == 実際に入る値 | **ASUMO 側にしか値解決が存在しない**ので構造的に保証（§2-1） |
-| C5 | ハニーポットに絶対入力しない | ワーカー側 `extract.ts` で検知 → ASUMO でマッピング除外 → ワーカーで二重ガード |
-| C6 | 同一企業へ二度送らない | ASUMO 側。`sf-exclusion` + `form_targets` の CAS（R4） |
-| C7 | 営業お断り表記を尊重する | ASUMO 側 `detectNoSalesPolicy`（ワーカーが返した可視テキストに対して実行） |
-| C8 | 対象外フォームに営業文面を入れない | ASUMO 側 適格性判定 |
-| C9 | 本文の途中切れを許さない | ASUMO 側 L3 の段階収縮 |
+| `FORM_NOT_FOUND` | 探したが問い合わせフォームが無い | 対象外 |
+| **`BLOCKED_BY_ROBOTS`**（新規・N5） | robots.txt が自動取得を拒否 | **「自動では取得しない／手送りは可」と表示** |
 
-受入テストは**この 9 項目それぞれに回帰テストを持つこと**を条件とする。
+`politeGet` は `{ blocked: true, reason }` を返す（`lib/fetchx/polite.ts:42`）。これを `FORM_NOT_FOUND` に
+落としてはいけない。**robots は自動取得についての意思表示**なので、担当者が手で開いて送るのは可であり、
+同一視するとその企業は手送りの対象にも二度と出てこなくなる。
+`SCRAPE_IGNORE_ROBOTS=1` という逃がし口があるが**使わない** — 設計の意図はそこではない。
+
+### 4-3. ドメインは列ではなく `url` から導出（F3）
+
+`customers` にドメイン列は無い。`lib/db/schema.ts:9` の `url` が 1 本だけで、
+`lib/normalize.ts` の `urlDomain(url)` で導出するのが既定の作法（`sf-exclusion` がそう使っている）。
+`l0_homepage.ts` を戻すかは「`url` が空の企業の割合」だけで決まり、**SQL 1 本で出る**。
+
+### 4-4. 工程 4 は既存。`dealNo` と `setStatus` 経由が必須（F6）
+
+| 事実 | 出典 |
+|---|---|
+| `{ no: 4, key: "STEP04_FORM", label: "工程4:フォーム送信" }`、`STEP.FORM = 4` | `lib/constants.ts:25` |
+| `board_steps` は **(companyId, dealNo, stepNo) で一意**。1社N商談で18工程がNセット並ぶ | `lib/db/schema.ts:212` |
+| 既存 `clientOutreachMarkFormSent` は `setStatus(companyId, STEP.FORM, DONE)` を呼ぶだけ | `outreach.impl.ts:688` |
+
+> 進行ボードの状態変更は `board_events` に 1 行残り、取り消しは `undone_at` を刻む設計で、
+> **機械が自動で進めた工程を人が戻せること**が既存の要件。engine から直接 UPDATE するとこの経路が抜ける。
+
+### 4-5. Plan スクショの保持期間と総量上限（F5）
+
+本番の書き込み先は Fly volume（`DB_PATH=/data/data.db`）で DB とスクレイプキャッシュが同居する。
+フルページ PNG は 1 枚 200KB〜1MB。**2,000社で volume が飽和し、DB の書き込みが失敗＝画面全体が止まる。**
+
+> `lib/fetchx/cache.ts:5` — 「上限が無いとキャッシュが volume を埋め、**DB の書き込みが失敗する**。
+> 総量上限と LRU 削除は後付けにしない」
+
+キャッシュが既に 200MB を予約（`SCRAPE_CACHE_MAX_MB` 既定 200）。**総量上限 + 古い順削除**を
+Phase 3 の受入条件に入れる。いつ捨てるかは運用判断 → **D3**。
+
+配信は **`app/api/formsend/artifact/[id]`**（認証プロキシ、既存 `app/api/zoom/recording` と同型）。
+rev.3 でこの route が Phase 5 成果物から落ちていた（N12）。`plan_screenshot_key` を持つだけでは
+画面に出せない。ワーカーがアップロードし ASUMO が認証つきで返す。§8-2 の対象にもなる。
 
 ---
 
-## 8. 段階計画（rev.2）
+## 5. 抑制：読みは統合・書きは engine（N1 で差し戻し）
 
-### Phase A — 先行投入：`guessFormUrl()` の置き換え（2〜3日・送信可否の決定と独立）
+### 5-1. 読み（`isSuppressed`）— rev.3 のまま正しい
 
-`outreach.impl.ts:651` の `guessFormUrl()` は定番パス 5 個のベタ書きである。
-L1 発見（定番パス → リンク走査 → sitemap）は明確な上位互換であり、
-**手送り運用のままでも効く**。ASUMO が送信主体になるかの結論を待つ必要がない。
+| 事実 | 出典 |
+|---|---|
+| `SUPPRESSION_CHANNELS = ["all","call","email","dm","form"]` | `lib/sf-exclusion.ts:21` |
+| 「架電/メール/DM/フォームの全経路がここを必ず通る」 | `lib/sf-exclusion.ts:202` |
+| `dnc` は **hard: true（続行不可）** | `lib/sf-exclusion.ts:32` |
+| 経路・期限・解除の回帰テスト 273行が既存 | `tests/suppression-channel.test.ts` |
 
-- 静的 3 段階のみ実装（ブラウザ描画フォールバックは Phase 2 でワーカーが付く）
-- クロールは ASUMO 既存の `polite.ts` に載せる（`utils/http.ts` は持ち込まない）
+`preSendCheck` → `isSuppressed({ ...targetFromCustomer(c), channel: "form" })` **のみ**。読み側は実装不要。
 
-**受入条件**: 現行 `guessFormUrl()` が見つけられなかった企業でフォーム URL が取れることを実データで確認。既存の手送りフローが壊れていない。
+### 5-2. 書き（送信済み）— `sf_exclusions` に置いてはいけない（N1）
 
-### Phase 0 — 意思決定（0.5日・調査ではない）
+rev.3 は `markSent` を `sf_exclusions` へ移した。**これが C6 を無音で壊す。**
 
-初版は 9 項目の調査に 2〜3 日を置いたが、**6 項目には既に答えがある**（§9）。
-残るのは調査ではなく意思決定 4 件（D1〜D4）。会議 1 本で決める。
+```
+営業が SF の架電禁止リストを CSV で入れ替え取込（kind=dnc / mode=replace）
+  ↓
+UPDATE sf_exclusions SET released_at = now WHERE kind='dnc' AND released_at IS NULL
+  ↓
+送信済み 2,000 社の記録が全部「解除済み」になる → isActiveEntry() が false
+  ↓
+次の execute で全社が再送対象。C6 違反が無音で起きる
+```
 
-### Phase 1 — 純ロジック層を ASUMO へ（3〜4日）
+| 事実 | 出典 |
+|---|---|
+| `mode=replace` は `where(and(eq(kind, payload.kind), isNull(releasedAt)))`。**channel も出所も見ない** | `lib/actions/exclusion.impl.ts:240` |
+| `kind` は `dnc` / `contact` の 2 値。「送信済み」に使える kind が無く、`isKind()` が第三の値を弾く | `lib/db/schema.ts:948` / `exclusion.impl.ts:32` |
+| 表の定義そのものが **SF 由来の除外リスト**（旧GAS 2シートの統合）。第三の出所を混ぜる前提が無い | `lib/db/schema.ts:940` |
+| `clientExclusionSummary` が `dnc`/`contact` 件数を `/exclusion` に出す。送信済みが DNC 件数に混ざると**法務台帳として読めなくなる** | `lib/actions/exclusion.impl.ts:148` |
+
+**→ C6 は `form_send_ledger` + `form_targets.status` に戻す（rev.1 の判断が正しかった）。**
+「フォーム送信済み（＝二度と送らない）」は engine 固有の状態であり、法務台帳に置く概念ではない。
+
+### 5-3. 営業お断り検知（C7）の置き場所 → D5（N2）
+
+同じ `mode=replace` は営業お断り由来の行も `released` にする。表に `source` / `origin` に相当する列が無いため、
+**「SF 由来の行だけ入れ替える」が今は表現できない。** 2 案：
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| **(a)** 推奨 | `sf_exclusions` に `source` 列を足し、`replace` 取込を `source = 'sf'` に限定 | 変更が小さく、将来どの経路から抑制を足しても同じ事故を防げる（W1 の「全経路がここを必ず通る」設計意図の側に立つ） |
+| (b) | 営業お断りは engine 側の表に持ち、`isSuppressed` と併せて 2 本判定 | 法務台帳を触らない。ただし判定が 2 本に分かれ、W1 が防ごうとした「書き忘れ」の余地が戻る |
+
+**法務のクリティカルパスなので、`tests/suppression-channel.test.ts` の原則（止まるはずのものが止まること）を
+先にテストで固定してから触る。** どちらを採るかは **D5**。
+
+engine 側に残すのは送信時間帯・日次上限・送信間隔、そして送信済み台帳。
+
+---
+
+## 6. LLM：`lib/gemini.ts` + `schema`（W3）
+
+rev.1 は `lib/external.ts` を指したが、そこは外部連携のスタブ・ファサード（`lib/external.ts:1`）。
+実体は `lib/gemini.ts`（Gemini 直接）と `lib/n2i-proxy.ts`（GAS プロキシ）。
+`lib/gemini.ts:19` の `GeminiOpts.schema`（`responseSchema`）で構造化 JSON を強制でき「実機確認済み」。
+
+**枠の制約**: Gemini 無料枠 **20 RPM** は `call-transcribe` が既に食っており、AI 機能が黙ってスタブに
+落ちる事象が起きている。`aiCapPerRun` 既定は **8/実行**（`lib/jobs/registry.ts`）。
+L2 の LLM 補完は 1社あたり最大 1 コール、`aiCapPerRun: 8` を既定とし超過は次回実行へ繰り越す。
+失敗・未設定時は**必ずルールのみで続行**。
+
+---
+
+## 7. 承認権限と操作ログ
+
+### 7-1. 「誰の名前で送るか」と「誰が承認してよいか」は別問題（F7）
+
+- `lib/authz.ts` に `manager` / `member`
+- 運用方針は「**記録が先、判定は後**」— `AUTH_REQUIRE_LOGIN=1` になるまでは拒否を記録だけする
+- **画面右上の担当者切替（`asumo_me` クッキー）はクライアントが自由に書ける値**なので承認者の根拠に使えない
+
+### 7-2. op_logs への本文流出は設計で防ぐ（F8）
+
+`op()` は引数をそのまま記録する。**画面から送るのは `submissionId` だけにし、本文はサーバ側で組み立てる**
+設計にすれば構造的に満たされる。`lib/oplog-catalog.ts` の `AREAS` に「メール・フォーム送信」が既にある
+（新設不要）。キー命名規則も定義済み：`<ファイル名>.<関数名から client を外したもの>` ／
+`page:<パス>` ／ `api:<メソッド> <パス>` ／ `job:<ジョブキー>`。
+
+---
+
+## 8. ASUMO 固有の関門（rev.4 新設・N8〜N12）
+
+`npm test` の 3 本立てのうち、個別に効く関門。**新規アクション・route すべてに効くので受入条件に入れる。**
+
+### 8-1. `catch` で `String(e)` を返すとテストが落ちる（N8）
+
+`tests/action-contract.test.ts` が `lib/actions/*.impl.ts` を構文木で走査し、`error:` に例外の原文を
+載せている箇所を落とす。理由は**営業担当の画面に `SqliteError: no such column` がそのまま出るから**。
+変換は `lib/errors.ts` の `toUserMessage()` に一本化されている。
+
+→ Phase 2〜5 の受入条件に入れる。
+
+### 8-2. ハンドアウト API は `tests/api-contract.test.ts` に足す（N9）
+
+固定されている契約：
+
+- 壊れた入力で **500 を返さない**（想定内の失敗は 400 / 404 / 413 で表す）
+- 失敗しても相手の用は足す
+- 応答の型を変えない
+
+**注意点**: `lib/google.ts`（`import "server-only"`）を辿る route は tsx から import できず、
+このテストに載せられない（代替は `npm run test:smoke`）。
+**ハンドアウト route が `session` / `google` を辿らない設計にしておくと、単体テストで守れる。**
+スクショ配信 route（§4-5）も同じ対象。
+
+### 8-3. ワーカー認証：fail-closed の作法と経路の選択（N10）
+
+`lib/auth-token.ts` はセッション cookie の署名専用（`AUTH_SECRET` / TTL 30日）で機械用トークンではない。
+**借りるべきは作法**：`authSecret()` は本番で未設定なら空を返し、sign / verify 側で閉じる —
+既定鍵にフォールバックすると**既知鍵でセッションを偽造できる**（`:17`）。
+ワーカートークンも同じく、**未設定なら受け付けない**（`dev-secret` 相当を作らない）。
+
+経路の選択が要る。`proxy.ts` は全体に BASIC 認証を掛け、公開パスだけ除外している
+（`:29` = `/picker` / `/api/auth/callback` / `/api/mail/` / `/api/zoom/webhook`）。
+
+| 案 | 内容 | トレードオフ |
+|---|---|---|
+| BASIC の内側 | ワーカーが BASIC 資格情報を持つ | 変更が最小。ただし失効管理が BASIC の粒度になる |
+| 除外して専用トークン | ハンドアウトパスを `:29` の除外に追加 | 失効管理ができる。**ただし除外に載せた時点でそのパスは社外から到達可能になる** |
+
+→ R3 に選択として明記。どちらを採っても fail-closed は必須。
+
+### 8-4. 冪等性と送信一意性を混ぜない（N11）
+
+`lib/idempotency.ts` の `idempotencyKey(scope, parts)`（TTL 既定 **120秒**、2回目は1回目と同じ結果を返す）は
+**ワーカーの結果送信の再送**にはこれが正解。ただし **TTL 120秒はワーカーのバックオフより短くなりえる**。
+
+「二度と送らない」（C6）は別問題で、`form_targets` の CAS と `form_send_ledger` が担う。
+
+| 層 | 守るもの | 部品 |
+|---|---|---|
+| API 呼び出しの重複 | 同じ結果報告が 2 回届いても 1 回として扱う | `idempotencyKey`（TTL 120秒） |
+| 送信の一意性（C6） | 同じ企業へ 2 回送らない | `form_targets` の CAS + `form_send_ledger` |
+
+---
+
+## 9. 壊してはいけない設計制約と「門番」（N13）
+
+rev.3 の表は「実装点」しか書いていなかった。**C1・C2・C5 はワーカー側コードの制約なので
+ASUMO の `npm test` では守れない** — 緑でも誰も見ていない状態になりえる。門番列を足す。
+
+| # | 制約 | 実装点 | 門番 |
+|---|---|---|---|
+| C1 | Plan はセッションを保持しない | ワーカー `finally { session.close() }` | **ワーカー CI** |
+| C2 | Plan は最終送信ボタンを押さない | ワーカー。`confirm` 種別のみクリック | **ワーカー CI** |
+| C3 | 値を捏造しない | ASUMO。未設定は空 → 適格性で除外 | ASUMO `npm test` |
+| C4 | プレビュー == 実際に入る値 | **ASUMO 側にしか値解決が存在しない**（構造的保証） | ASUMO `npm test` |
+| C5 | ハニーポットに絶対入力しない | ワーカー `extract.ts` → ASUMO で除外 → ワーカーで二重ガード | **ワーカー CI**（検知）+ ASUMO（除外） |
+| C6 | 同一企業へ二度送らない | **`form_send_ledger` + `form_targets` の CAS**（§5-2） | ASUMO `npm test` |
+| C7 | 営業お断り表記を尊重する | ASUMO で検知 → 登録先は **D5** | ASUMO `npm test` |
+| C8 | 対象外フォームに営業文面を入れない | ASUMO 適格性判定 | ASUMO `npm test` |
+| C9 | 本文の途中切れを許さない | ASUMO L3 の段階収縮 | ASUMO `npm test` |
+
+**ワーカー側にも CI を置き、両方の緑を Phase の受入条件にする。** これが一番安い直し方である。
+
+`tests/suppression-channel.test.ts` 冒頭の「守りたいのは1つだけ：**止まるはずのものが止まること**」と
+同じ思想であり、そのまま噛み合う。C4 は既存の `/form-outreach` にも今は無い保証である。
+
+---
+
+## 10. 段階計画
+
+### Phase A — `guessFormUrl()` の置き換え（4〜6日・**D1 と独立**）
+
+現行の URL 推測は `lib/actions/outreach.impl.ts:651` の `guessFormUrl()` — 定番パス 5 個のベタ書き。
+L1 発見は明確な上位互換で、**担当者が手で送る現行フローのままでも効く**。
+
+rev.3 は「`polite()` の上に書き直す」だけで中身が薄かった。以下を具体化する。
+
+**A-1. `observeCompany()` をなぞる（N3）** — L1 静的とほぼ同型の巡回が `lib/prospect/observe.ts` に既にある。
+
+| なぞる点 | 出典 |
+|---|---|
+| トップ →（必要なら）会社概要 → 採用ページ の**最大 4 ページで打ち切る**。rev.3 の L1 は候補パス数が無制限だった | `observe.ts:46` |
+| 定番パスは `break` で 1 枚打ち切り。相手のサーバに何枚も当てない | `observe.ts:87` |
+| 毎 fetch の前に `signal.aborted` を見る（ジョブのタイムアウトで即降りる） | 同 |
+| `pagesFetched` を数えて `job_runs.detail` に載せる（滞留の診断が効く） | 同 |
+| リンク走査は `findRecruitLinks(topUrl, top.html)` と同型の関数で行う | 同 |
+
+→ **1社あたりのページ予算を数字で決める**：定番パス 3 + リンク走査 1 + sitemap 1 = **最大 5 リクエスト/社**。
+
+**A-2. cheerio は足せない（N4）** — 移植元 L1 のリンク走査は cheerio 前提だが、これは持ち込めない。
+
+> `lib/fetchx/extract.ts:6` — 要るのは `<a href="tel:">` / `<a href>` / 可視テキストの 3 つだけで、
+> そのために 1MB 級の DOM パーサを本番イメージへ足す理由が無い
+
+`docs/リスト作成機能_移植_20260811.md:101` の表にも「cheerio 非依存」の行があり、等価性は検証済みと明記。
+
+→ **`lib/fetchx/extract.ts` にフォームリンク版の抽出関数を足す**（`findRecruitLinks` の隣）。
+rev.3 の見積 2〜3日はこの分を含んでいなかった。**+1〜2日**。
+
+**A-3. robots 拒否の状態を分ける（N5）** — §4-2 の `BLOCKED_BY_ROBOTS`。
+
+**A-4. スループットを数字で置く（N6）** — 既定値のままでは 1 実行 5〜7社しか回らない。
+
+| 計算 | 出典 |
+|---|---|
+| `throttle()` は同一ホスト直列 + 取得後に `SCRAPE_DELAY_MS`（既定 **4,000ms**）待ち | `polite.ts:73` |
+| 企業をまたいだ処理では各サイトの負荷は増えない。ホストをまたぐ待ちは無い（**企業間は並列可**） | `polite.ts:53` |
+| 1社は同一ホストへ 3〜5 リクエスト → 逐次で **15〜25秒/社** | — |
+| `JobDef.timeoutMs` 既定 120,000ms → 逐次なら **5〜7社/実行**。`maxPerRun` 既定 50 に届かない | `registry.ts` |
+
+→ 企業をまたいで**小さな固定並列（4〜6）**で回し、`timeoutMs` と `maxPerRun` を実測から明示設定。
+**1GB なので `SCRAPE_MAX_BYTES`（2MB）× 並列数がメモリに直接効く。**
+`hasWork` は「`form_url` 未設定の企業が居るか」で書ける。
+
+**受入条件**: 現行 `guessFormUrl()` が見つけられなかった企業でフォーム URL が取れることを実データで確認 ／
+1社あたりのリクエスト数が予算内 ／ robots 拒否が `BLOCKED_BY_ROBOTS` として分離される ／
+`pagesFetched` が `job_runs.detail` に出る ／ 既存の手送りフローが壊れていない ／
+`npm test` 3本立て + `docs:sync` + devlog
+
+### Phase 0 — 意思決定（0.5日）
+
+D1〜D5（§12）。
+
+### Phase 1 — 純ロジック層を ASUMO へ（3〜4日・**D1 と独立**）
 
 - `types` / `parse/*` / `content/*` / `fill-policy` / `coverage` / `gate` / `eligibility` / `judge`（純関数化）
 - `tests/l2_parsing.test.ts`（33KB・実フォームのキャプチャを replay する**ブラウザ非依存**テスト）を移植。
-  **これは移植の生命線**であり、実企業フォームで積んだ知見の唯一の回帰網
+  **移植の生命線**であり、実企業フォームで積んだ知見の唯一の回帰網
 
-**受入条件**: `npm test`（**3本立ての全て**）が緑 ／ `lib/formsend/` が ASUMO の他モジュールを import していない
+**受入条件**: `npm test`（typecheck + `run-tests.mjs` + `docs:check` の3本すべて）が緑 ／
+`lib/formsend/` が他モジュールを import していない（lint 固定）／ devlog に 1 エントリ
 
-### Phase 2 — ワーカー + プロトコル（4〜5日）
+### Phase 5a — 確認 UI（4〜5日・**D1 と独立**・N7）
 
-- ワーカー本体（ブラウザ層・打鍵機構・静的クロール）とポーラ
-- ASUMO 側のハンドアウト API（リース発行・結果受理・トークン認証）
-- ローカルテストフォームサーバ（確認画面あり2段 / 1段）を**ワーカー側の E2E** として移植
+項目別カバレッジ表・Plan スクショ・文面プレビュー・手動編集は **D1 がどちらに転んでも要る**。
+担当者が手で送る現行フローのままでも、**C4（プレビュー == 実際に入る値）は今の `/form-outreach` に無い保証**で、
+そのまま価値になる。
 
-**受入条件**: ローカルテストフォームで 2段/1段の両方が Plan → Execute まで通る ／ **C1・C2 の回帰テスト** ／ ワーカーを落としても ASUMO 側が壊れず、再起動で処理が再開する
+- カバレッジ表（誤り疑い・未入力の必須・ハニーポット表示）
+- Plan スクショの表示と配信 route（§4-5・N12）
+- 文面プレビューと手動編集 → 再プレビュー
+- server action は `submissionId` だけを受ける（§7-2）。`op()` で包み `oplog-catalog.ts` へ登録
+- `catch` は `toUserMessage()` を通す（§8-1）
 
-### Phase 3 — データ層（4〜5日）
+**受入条件**: `npm test` 3本立てが緑 ／ **C4 の回帰テスト** ／ 手動編集→再プレビューが画面だけで完結 ／
+`action-contract` / `api-contract` テストが緑
+
+### Phase 2 — ワーカー + プロトコル（6〜9日・**D1/D2 待ち**）
+
+- ワーカー本体（ブラウザ層・打鍵機構・描画フォールバック）とポーラ
+- ハンドアウト API（リース発行・結果受理・トークン認証・冪等性）。
+  **`session` / `google` を辿らない設計にする**（§8-2）
+- ワーカー認証は fail-closed。経路は D2 と併せて決める（§8-3）
+- 結果送信の再送は `idempotencyKey`。C6 とは層を分ける（§8-4）
+- ローカルテストフォームサーバ（2段 / 1段）をワーカー側 E2E として移植
+- **ワーカー側 CI を立てる**（§9 の門番）
+
+**受入条件**: 2段/1段の両方が Plan → Execute まで通る ／ **C1・C2・C5 の回帰テストがワーカー CI で緑** ／
+無認証リクエストが拒否される ／ 壊れた入力で 500 を返さない ／
+ワーカーを落としても ASUMO が壊れず再起動で再開する
+
+### Phase 3 — データ層（5〜6日）
 
 - Drizzle スキーマ（**外部キー列は `company_id`**）+ マイグレーション
-- `lib/company-reset.ts` の `TARGETS` 登録
-- 状態機械の書き換え、工程反映（工程4の `dealNo` の扱いを含む）
+- `TARGETS` 登録（`sf_exclusions` は入れない）
+- `form_send_ledger` の移植と `form_targets` の CAS（§5-2）
+- 状態機械の書き換え（`BLOCKED_BY_ROBOTS` を含む）、`setStatus` 経由の工程反映（`dealNo` の決定）
+- **スクショの総量上限 + 古い順削除**（後付けにしない）
 - 現行 `data/app.db` からの移行スクリプト
 
-**受入条件**: `company-reset.test.ts` が緑 ／ `companies:reset` / `demo:purge` が `form_*` も掃除する ／ **C6 の回帰テスト**
+**受入条件**: `company-reset.test.ts` が緑 ／ `companies:reset` / `demo:purge` が `form_*` を掃除し
+`sf_exclusions` は残す ／ スクショ総量が上限内 ／ **C6 の回帰テスト（CSV 入れ替え取込の後でも
+送信済みが再送対象にならないことを含む）**
 
-### Phase 4 — 安全機構の結線（1日・初版から大幅短縮）
+### Phase 4 — 安全機構の結線（1〜1.5日 + D5 の実装分）
 
-抑制の読み書きが `isSuppressed` 呼び出しに縮んだため、残るのはペーシングと権限のみ。
-
+- `isSuppressed({ channel: "form" })` の結線（読み側は既存・実装不要）
 - 送信時間帯 / 日次上限 / 送信間隔をハンドアウト判定へ
-- **承認・送信操作を `authz.ts` の権限判定に通す**（初版の欠落）
+- **承認・送信操作を `authz.ts` に通す**。`asumo_me` クッキーを承認者の根拠にしない
+- D5 が (a) なら `sf_exclusions` の `source` 列追加 +
+  `replace` 取込の限定（**先に `suppression-channel.test.ts` で原則を固定してから**）
 
-**受入条件**: **C6/C7 の回帰テスト** ／ 時間帯外・上限超過で 1 件も渡らない ／ 権限のないユーザーが承認・送信できない
+**受入条件**: **C6/C7 の回帰テスト** ／ 時間帯外・上限超過で 1 件も渡らない ／
+権限のないユーザーが承認・送信できない
 
-### Phase 5 — 画面（5〜7日・最大の作業量）
+### Phase 5b — 承認・送信（**見積不能。D1 待ち**）
 
-- 承認待ち / 承認済み / 除外のタブ、項目別カバレッジ表、Plan スクショ、手動編集、単発・一斉送信
-- **ワーカーの死活表示**（最終ポーリング時刻・待機中の作業数）— 無いと滞留に気づけない（R2）
-- server action を `op()` で包み、`oplog-catalog.ts` へ日本語名を登録（本文は文字数のみ記録）
-- `ui/nav.ts` へ画面登録、スクショ配信 API
+- 「承認して送信」ボタン・`authz` 判定・一斉送信
+- **ワーカーの死活表示**（最終ポーリング時刻・待機件数）— 無いと滞留に気づけない（R1）
 
-**受入条件**: `npm test` 3本立てが緑 ／ **C4 の回帰テスト** ／ 手動編集→再プレビュー→承認→送信が画面だけで完結
+### Phase 6 — ジョブ・検証（4〜6日）
 
-### Phase 6 — 運用（3〜4日）
-
-- スクショの保持期間・総量上限とその掃除ジョブ（§4-3）
-- ASUMO 側に残る軽量ジョブを `registry.ts` へ登録（**`tasks.ts` ではない**。既定 `timeoutMs` 120秒に収まる粒度で）
-- `docs:sync` / devlog の作法に従ったドキュメント整備
+- ASUMO 側の軽量ジョブを **`lib/jobs/registry.ts` の `JOBS: JobDef[]`** へ登録
+  （**`lib/jobs/tasks.ts` ではない**）
+- **`JobDef` が既に持っているものを手で作らない**: `hasWork` ／ `deps` ／ `maxPerRun` ／
+  `aiCapPerRun` ／ `timeoutMs` ／ `retry` ／ `singleWriter` ／ `adaptive`
 - 実企業 10〜20社に対する **Plan フェーズのみ**の実地検証（送信はしない）
 
-**受入条件**: **C5/C8/C9 の回帰テスト** ／ スクショ総量が上限内に収まる ／ 現行 `docs/field_test_findings.md` と同等の入力精度
+**受入条件**: **C5/C8/C9 の回帰テスト** ／ 現行 `docs/field_test_findings.md` と同等の入力精度
 
 ### 工数
 
-| Phase | 内容 | 見積 |
-|---|---|---:|
-| A | `guessFormUrl()` 置き換え（先行・独立） | 2〜3日 |
-| 0 | 意思決定 | 0.5日 |
-| 1 | 純ロジック層 → ASUMO | 3〜4日 |
-| 2 | ワーカー + プロトコル | 4〜5日 |
-| 3 | データ層 | 4〜5日 |
-| 4 | 安全機構 | 1日 |
-| 5 | 画面 | 5〜7日 |
-| 6 | 運用 | 3〜4日 |
-| | **合計（1人・逐次）** | **23〜30日** |
+| Phase | 見積 | D1 依存 |
+|---|---:|---|
+| A `guessFormUrl()` 置き換え | 4〜6日 | **独立** |
+| 1 純ロジック層 | 3〜4日 | **独立** |
+| 5a 確認 UI | 4〜5日 | **独立** |
+| 0 意思決定 | 0.5日 | — |
+| 2 ワーカー + プロトコル | 6〜9日 | 待ち |
+| 3 データ層 | 5〜6日 | — |
+| 4 安全機構 | 1〜1.5日 + D5分 | — |
+| 5b 承認・送信 | 見積不能 | **待ち** |
+| 6 ジョブ・検証 | 4〜6日 | — |
 
-Phase A は独立して先行可能。Phase 1 と Phase 2 は並行可能（境界がプロトコルで切れているため）。
-
----
-
-## 9. リスク（rev.2 で全面差し替え）
-
-初版の R1/R5（Playwright のバンドル・HMR リーク）は**開発機の話に閉じており本番の話が無かった**。
-ブラウザを分離したことで両方とも消え、代わりにワーカー運用のリスクが立つ。
-R2（dispatcher 衝突）と R6（Gemini の JSON）も §3-2 / §6 で解消済み。
-
-| # | リスク | 影響 | 対策 |
-|---|---|---|---|
-| R1 | **ワーカーが動いていない** | キューが静かに滞留する。「送ったつもりで 1 件も出ていない」 | 最終ポーリング時刻と待機件数を承認画面に常時表示（Phase 5 受入条件）。N 時間無音でアラート |
-| R2 | ワーカーの実行環境が個人PC | 端末の入れ替え・OS更新で止まる。属人化 | 手順を devlog に残す。中期的には常時稼働の実行環境へ移す（§10） |
-| R3 | **ハンドアウト API が無認証だと外部から送信を起こせる** | 第三者が実企業へ送信できる | ワーカー専用トークン必須。ASUMO 側で発行・失効可能に。Phase 2 の受入条件へ |
-| R4 | **二重送信**（複数ワーカー・リトライ・再送） | C6 違反 | `form_targets` の `lease_token`/`leased_until` によるリース + 送信直前の CAS。更新行数 0 なら送らない |
-| R5 | **Plan スクショが volume を埋める** | `cache.ts:5` の罠を再度踏み、DB 書き込みが失敗する | 保持期間 + 総量上限 + 掃除ジョブ（§4-3）。Phase 6 の受入条件へ |
-| R6 | `registry.ts` の既定 `timeoutMs` 120秒 | ASUMO 側に載せたジョブが途中で切られる | ブラウザ作業は載せない。載せるのは掃除など短いものだけ。長いものは分割 |
-| R7 | Fly の suspend からの復帰遅延 | ワーカーの最初の要求がタイムアウトする | ワーカー側でリトライ + バックオフ。cold start を異常扱いしない |
-| R8 | 移植途中で 2 システムが並走 | L2 マッパー改善が片方にしか効かない | 移行後に現行システムを読み取り専用へ凍結。並走は 1 スプリント以内 |
-| R9 | `reparse` 相当の移行手順が漏れる | ASUMO 側でも古いマッピングのまま塩漬け | `formsend:reparse` を Phase 3 で用意し、docs へ手順を残す |
+**D1・D2 が未決のあいだも動く: Phase A + 1 + 5a = 11〜15日ぶん。**
+これで「正しいフォーム URL が出て、文面が出て、実際に入る値が事前に見える」まで到達する
+（送信主体が担当者のままでも成立する範囲）。**D1 の議論の材料にもなる。**
 
 ---
 
-## 10. 将来の選択肢
+## 11. リスク
 
-ワーカーを手元PCに置くのは**始点であって終点ではない**。プロトコルで切れているため、
-実行環境だけを差し替えられる。
+| # | リスク | 対策 |
+|---|---|---|
+| R1 | **ワーカーが動いていない** — キューが静かに滞留し「送ったつもりで1件も出ていない」 | 最終ポーリング時刻と待機件数を承認画面に常時表示（Phase 5b）。N 時間無音でアラート |
+| R2 | **二重送信**（複数ワーカー・リトライ・再送）＝C6 違反 | **層を分ける**（§8-4）：API 呼び出しの重複は `idempotencyKey`（TTL 120秒）／ 送信の一意性は `form_targets` の CAS + `form_send_ledger`。混ぜない |
+| R3 | **ハンドアウト API が無認証だと外部から送信を起こせる** | fail-closed（未設定なら受け付けない・`dev-secret` を作らない）。経路は BASIC の内側 / 除外＋専用トークン の選択（§8-3） |
+| R4 | ジョブの `timeoutMs` とブラウザ寿命の不整合 | 既定 120,000ms。ブラウザ作業は ASUMO に載せない。Phase A の並列度と `timeoutMs` は実測から明示設定（§10 A-4） |
+| R5 | ワーカーの実行環境が個人PC | 手順を devlog に残す。中期的には常時稼働の実行環境へ（§13） |
+| R6 | Fly の suspend からの復帰遅延 | ワーカー側でリトライ + バックオフ。cold start を異常扱いしない |
+| R7 | Gemini 20RPM の枠を `call-transcribe` と食い合う | `aiCapPerRun: 8`。超過は繰り越し、ルールのみで続行（§6） |
+| R8 | **`SCRAPE_MAX_BYTES`（2MB）× 並列数がメモリを食う** | 1GB なので並列度は 4〜6 に留める。実測して決める（§10 A-4） |
+| R9 | 移植途中で 2 システムが並走 | 移行後に現行システムを読み取り専用へ凍結。並走は 1 スプリント以内 |
+| R10 | `reparse` 相当の移行手順が漏れる | `formsend:reparse` を Phase 3 で用意し docs へ残す |
 
-- **常時稼働の実行環境へ移設**: Chromium が載るサイズのマシン（Fly の別プロセスグループ、
-  あるいは社内サーバ）へワーカーを移す。ASUMO 側の変更はゼロ
-- **ワーカーの複数化**: リース機構（R4）が既に前提なので、台数を増やすだけでスループットが上がる
+**解決済みとして消したリスク**: SQLite 書き込み競合は `JobDef.singleWriter` 既定（F1）。
+Gemini の JSON は `responseSchema`（W3）。dispatcher 衝突は `utils/http.ts` を移植対象から外して消滅（F4）。
 
 ---
 
-## 11. 決めること（4件）／ 既に答えがあること（6件）
-
-### 決めること — いずれも技術判断ではない
+## 12. 決めること（5件）
 
 | # | 論点 | 補足 |
 |---|---|---|
-| **D1** | **ASUMO が送信主体になってよいか** | 初版は「置換か裏側か」という技術判断として扱ったが誤り。`form-outreach/page.tsx:5` に「asumo は1通も送らないから」画面を分けたと明記されている。**業務判断であり、Phase 1〜6 全体の前提**。なお Phase A はこの結論を待たずに着手できる |
-| **D2** | 送信者アイデンティティ（会社固定 or 担当者別） | 現行は `.env` の `SENDER_*` が「フォーム入力値と署名の唯一の出典」。ASUMO は複数担当を持つため、この一元化をどう持ち上げるか。C3 の判定基準にも影響 |
-| **D3** | 送信の日次上限・時間帯（既定 200件 / 9–19時）を ASUMO の営業ポリシーと揃えるか | ワーカーの稼働時間設計にも直結する |
-| **D4** | ワーカーの設置場所と運用責任者 | 誰の端末で、誰が落ちたことに気づくか（R1/R2） |
+| **D1** | **ASUMO が送信主体になってよいか** | `app/(main)/form-outreach/page.tsx:5` — 「メール送信（/outreach）から独立させたのは、**asumo は1通も送らない**から。ここで作るのは文面と URL の候補だけで、実際に送信するのは担当者本人の手作業になる」。画面バナーにも「この画面から**自動送信はされません**」。**営業・法務の判断であり、Phase 2・5b の前提**。Phase A・1・5a は待たずに動く |
+| **D2** | **Chromium をどこで走らせるか** | D1 に従属。既決事項（§1）を覆すなら理由を文書に残す。ワーカー認証の経路（§8-3）も併せて決める |
+| **D3** | **Plan スクショの保持期間と総量上限** | 承認済み・送信済みをいつ捨てるか（§4-5） |
+| **D4** | **送信者アイデンティティ と 承認権限** | 「誰の名前で送るか」（`SENDER_*` の一元化）と「誰が承認してよいか」（`authz.ts`・`asumo_me` は根拠にできない）の両方（§7-1） |
+| **D5**（新規・N2） | **営業お断り検知の置き場所** | (a) `sf_exclusions` に `source` 列を足し `replace` 取込を `source='sf'` に限定（推奨） ／ (b) engine 側の表に持ち 2 本判定。**法務のクリティカルパスなので、先に `suppression-channel.test.ts` で原則を固定してから触る**（§5-3） |
 
-### 既に答えがあること — 調査不要
+副次的に、送信の日次上限・時間帯（既定 200件 / 9–19時）を ASUMO の営業ポリシーと揃えるかがある。
+Phase 4 の実装時に決めれば足りる。
 
-| 初版 Phase 0 の項目 | 答え |
-|---|---|
-| `/outreach` の実装・置換可否 | `form-outreach/page.tsx:5` — 業務判断（D1 へ移動） |
-| 抑制リストのスキーマと意味論 | `sf-exclusion.ts:21,202` — `form` チャネル実装済み（§5） |
-| テストランナー | `npm test` は 3本立て |
-| `TARGETS` の列名対応 | `company-reset.test.ts:214` は列名リテラル照合。`company_id` 必須（§4-1） |
-| LLM の参照先と JSON 返却 | `gemini.ts` の `responseSchema`。`external.ts` はスタブ・ファサードで参照先が違う（§6） |
-| Next.js + Playwright の同居 | 成立しない。`polite.ts:15` ほか（§1） |
+### 既に答えがあり調査不要
+
+`/outreach` の位置づけ（`form-outreach/page.tsx:5` — 業務判断）／ 抑制の読み（`sf-exclusion.ts:21,202`）／
+テストランナー（`package.json:53`）／ `data.db` の pragma（WAL・`singleWriter` 既定）／
+`TARGETS` の列名（`company_id` 一択）／ `customers` のドメイン列（無い・`url` のみ）／
+LLM の参照先（`lib/gemini.ts`）／ Next.js + Playwright の同居（成立しない）。
 
 ---
 
-## 付録. 現行機構の処理フロー（rev.2 — 実行主体つき）
+## 13. 将来の選択肢
+
+- **常時稼働の実行環境へ移設**: Chromium が載るサイズのマシンへワーカーを移す。ASUMO 側の変更はゼロ
+- **ワーカーの複数化**: リース機構（R2）が前提なので、台数を増やすだけでスループットが上がる
+
+---
+
+## 付録. 処理フロー（実行主体つき）
 
 ```
 [W] ワーカー   [A] ASUMO
 
-[W] L1 発見     domain → 定番パス → リンク走査 → sitemap → (静的で見つからなければ) 描画
-                  ↓ formUrl + confidence
+[A] L1 静的     polite() で 定番パス(3) → リンク走査(1) → sitemap(1) = 最大5req/社
+                  → robots 拒否なら BLOCKED_BY_ROBOTS（手送りは可）
+                  ↓ 静的で決まらない候補のみ
+[W] L1 描画     候補を描画してフォーム有無を確認
+                  ↓ [A] が確度を採点 → formUrl + confidence
 [W] 観測        ページを開く → 項目抽出（ラベル/必須バッジ/ハニーポット/maxlength/autocomplete）
                   → ボタン分類 / CAPTCHA種別 / 可視テキスト / formSelector
-                  ↓ 生の観測データを ASUMO へ
-[A] L2 解析     分割欄検出（姓名・カナ・電話・郵便・住所・メール確認）
-                  → 辞書マッピング（貪欲割当）→ LLM補完（曖昧項目のみ・任意）
-                  → 必須select/radio 自動選択 → 営業お断り検知
-                  → ゲート判定（high / mid / low / block）
-                  ↓ FormSchema を保存
-[A] L3 文面     テンプレ + 変数差込 + 業種別パーソナライズ + 署名生成
+                  ↓ 生の観測データ
+[A] L2 解析     分割欄検出 → 辞書マッピング → LLM補完（gemini schema・任意）
+                  → 必須select/radio 自動選択 → 営業お断り検知（登録先は D5）
+                  → ゲート判定（high / mid / low / block）→ FormSchema を保存
+[A] L3 文面     テンプレ + 差込 + 業種別パーソナライズ + 署名
                   → maxlength に収まるまで optional ブロックを段階的に削る
                   → ロール別入力値を解決（分割欄へ配分・ふりがな変換・手動編集の適用）
 [A] 適格性      非B2B / 対象外フォーム / CAPTCHA / 未充足必須 / 本文超過 → 除外
-                  ↓ FormSchema + 解決済み値をワーカーへ
+                  ↓ FormSchema + 解決済み値
 [W] L4 Plan     新規セッション → 全項目入力 → 確認ボタンのみクリック → スクショ → セッション破棄
-                  ↓ スクショを ASUMO へ
-[A] 承認        項目別カバレッジ・誤り疑い・本文を確認 → 手動編集 → 承認（authz 判定）
-[A] ハンドアウト 抑制チェック（isSuppressed channel=form）→ ペーシング → リース発行
-                  ↓ FormSchema + 解決済み値をワーカーへ
+                  ↓ スクショをアップロード
+[A] 確認(5a)    カバレッジ・誤り疑い・本文を確認 → 手動編集 → 再プレビュー
+[A] 承認(5b)    承認（authz 判定・approved_by は検証済み本人）
+[A] ハンドアウト isSuppressed(channel=form) → form_send_ledger 照会 → ペーシング
+                  → form_targets を SUBMITTING へ CAS（更新0件なら渡さない）→ リース発行
+                  ↓ FormSchema + 解決済み値
 [W] L4 Execute  新規セッション → 同一内容で再入力 → 確認 → 最終送信
-                  ↓ finalUrl / 可視テキスト / 残存フォーム数
-[A] L5 判定     成功文言 / URL遷移 / フォーム消失 / エラー文言 / CAPTCHA残存 で
-                  submitted_success / failed / captcha / needs_review
-[A] 記録        送信成功 → sf-exclusion へ channel=form で登録（二度と送らない）
+                  ↓ finalUrl / 可視テキスト / 残存フォーム数（再送は idempotencyKey で1回扱い）
+[A] L5 判定     成功文言 / URL遷移 / フォーム消失 / エラー文言 / CAPTCHA残存
+                  → submitted_success / failed / captcha / needs_review
+[A] 記録        送信成功 → form_send_ledger に記録 ＋ form_targets.status = SUBMITTED_SUCCESS
+                  （★ sf_exclusions には書かない — CSV 入れ替え取込で消える・§5-2）
+                  → setStatus(companyId, STEP.FORM, DONE) で工程4へ反映（board_events に残る）
 ```
-
----
-
-## 未反映：レビュー指摘の残り 2 件
-
-レビューで挙がった見落とし 8 件のうち、本改訂に反映したのは 6 件
-（`registry.ts` / スクショ保持 / `npm test` 3本立て / `docs:sync`・devlog / 工程4の `dealNo` / `authz.ts`）。
-**残り 2 件は記事側にのみ存在し、本計画書に未反映。** 受領後に rev.3 で取り込む。
