@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS companies (
   updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status);
+-- byStatus() orders by (icp_score DESC, id) — with 3万件 in the table the sort
+-- alone dominates the query, so cover it in the index.
+CREATE INDEX IF NOT EXISTS idx_companies_status_score ON companies(status, icp_score DESC, id);
 
 -- L2 product
 CREATE TABLE IF NOT EXISTS field_maps (
@@ -72,6 +75,57 @@ CREATE TABLE IF NOT EXISTS audit_log (
   detail     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_company ON audit_log(company_id);
+
+-- ============================ 取り込みジョブ (L0) ============================
+-- 3万件規模のリストは 1 リクエストでは処理しきれない（途中でブラウザが切れる／
+-- サーバが再起動する）。そこで「取り込み対象そのもの」を先に DB へ保存し、
+-- カーソルを進めながら少しずつ処理する。中断しても続きから再開でき、同じ企業を
+-- 二度読み込むことがない。
+CREATE TABLE IF NOT EXISTS import_jobs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  status        TEXT NOT NULL DEFAULT 'running',  -- running/paused/done/failed
+  phase         TEXT NOT NULL DEFAULT 'ingest',   -- ingest/resolve/pipeline/done
+  options_json  TEXT NOT NULL DEFAULT '{}',
+  total         INTEGER NOT NULL DEFAULT 0,
+  counters_json TEXT NOT NULL DEFAULT '{}',
+  error         TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status);
+
+-- 1 行 = 取り込みリストの 1 社。state がその行のセーブポイント。
+--   pending    未処理
+--   ingested   companies に登録済み（パイプライン待ち）
+--   known      すでに取り込み済みの企業（再処理しない）
+--   suppressed 競合等で除外   nodomain ドメイン無しでスキップ
+--   unresolved HP を特定できず  done パイプライン完了  error 失敗
+CREATE TABLE IF NOT EXISTS import_rows (
+  job_id     INTEGER NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  name       TEXT NOT NULL,
+  domain     TEXT,
+  industry   TEXT,
+  employees  INTEGER,
+  prefecture TEXT,
+  source     TEXT,
+  state      TEXT NOT NULL DEFAULT 'pending',
+  company_id INTEGER,
+  detail     TEXT,
+  PRIMARY KEY (job_id, seq)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_import_rows_state ON import_rows(job_id, state, seq);
+
+-- HP 自動探索の結果キャッシュ。1 社あたり複数回の Web 検索＋取得が走るため、
+-- 一度探した会社名は（見つからなかった場合も含めて）二度と探索しない。
+CREATE TABLE IF NOT EXISTS hp_resolutions (
+  name_key   TEXT PRIMARY KEY,           -- 正規化した会社名（+業種/都道府県）
+  domain     TEXT,                       -- NULL = 見つからなかった
+  method     TEXT,
+  confidence REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- Pacing ledger: one row per final (Execute) submission, used to enforce daily send cap.
 CREATE TABLE IF NOT EXISTS send_ledger (

@@ -137,6 +137,35 @@ gate=high を全自動送信するには `plan --auto-high`（§5 の段階自�
 
 ヘッダ行が無い場合のみ、1列目=会社名 / 2列目=ドメイン として位置で読む。
 
+### 大量リスト（数万件）の取り込み — 保存して中断・再開できる
+
+3万件規模のリストは 1 リクエストでは終わらない。取り込みは
+**「まずリストを丸ごと保存 → チャンク単位で処理 → 都度チェックポイント」**で進む
+（[src/pipeline/intake.ts](src/pipeline/intake.ts)）。
+
+1. **保存（セーブ）** — 貼り付け／アップロードされた行は最初に `import_rows` へ書き込まれ、
+   ジョブが `import_jobs` に登録される。ここまでが HTTP レスポンス（3万件で約0.5秒）。
+   以降ブラウザを閉じても・接続が切れても、取り込みはサーバ側で進む。
+2. **チャンク処理** — 既定 500 行 = 1 トランザクション（`INTAKE_CHUNK_SIZE`）。
+   1 チャンクごとに進捗を保存し、イベントループを解放するのでダッシュボードは固まらない。
+3. **中断・再開** — 「■ 中断」で次の区切りまでで停止し、「▶ 続きから再開」で続行。
+   サーバを再起動した場合も、起動時に未完了ジョブを検出して**自動で続きから再開**する。
+   CLI からは `npm run cli -- intake`（状況表示）/ `npm run cli -- intake --resume`。
+4. **一度読み込んだ企業は再処理しない** — 取り込み済みのドメインはスキップする
+   （既定 ON / ダッシュボードのチェックボックスで切替）。同じリストを再取り込みしても
+   一瞬で終わる。ただし前回 `FORM_NOT_FOUND` / `PARSE_FAILED` で終わった企業だけは
+   自動で再挑戦する。HP自動探索の結果（見つからなかった場合も含む）も `hp_resolutions` に
+   保存され、二度と同じ検索をしない。
+
+行ごとの結果は `import_rows.state` に残る（`pending` / `ingested` / `known` / `suppressed` /
+`nodomain` / `unresolved` / `done` / `error`）。「HP未特定」「スキップ」の明細は件数だけを表示し、
+一覧は必要なときに先頭200件ずつ取得する（`GET /api/import/rows`）。
+
+処理速度の目安（実測・ローカル / 3万件・パイプラインなし）:
+リスト解析 40ms → 保存 0.5秒 → 取り込み完了 1.4秒、再取り込み（全件スキップ）0.7秒。
+フォーム発見（L1/L2/L4-Plan）は 1 社ごとに Chromium を起動するため、`INTAKE_CONCURRENCY`
+（既定3）で並列に処理する。
+
 ### 企業HPを自動探索（名前だけのリストから送信まで）
 
 ドメインが無く**企業名だけ**のリストでも、HP（公式サイト）を自動で探索してから
@@ -233,6 +262,30 @@ npm run serve                 # http://localhost:4599
    なお **reCAPTCHA v3 は不可視・スコア型**で操作対象が無いため除外しない。ただし gate は `mid` 止まり
    にして全自動送信の対象からは外す（人が承認する）。
 
+#### ③ 送信 — 全項目クリアの企業だけを、取り込みと並走して随時送信
+
+送信タブの一斉送信は、**すべての項目に問題がない企業だけ**を対象にする
+（[src/pipeline/readiness.ts](src/pipeline/readiness.ts) / [src/pipeline/bulkSend.ts](src/pipeline/bulkSend.ts)）。
+判定は確認画面が項目単位で表示しているものと同一のロジック（`coverage` + `eligibility`）を
+そのまま使う — 画面で緑になっている企業だけが送られる、という一対一の関係を保つ。
+
+**送信される条件（すべて満たす場合のみ）**: 必須の未入力 0 件 / 誤り疑い 0 件（入力上限超過を含む）/
+適格フォーム（非B2B・CAPTCHA v2・営業お断り等でない）/ 抑制リストに非該当（送信済みを含む）/
+フォーム発見・解析済み / 送信プレビュー（Plan）作成済み。
+
+- 全項目クリアなら、**承認待ちのままでも自動承認して送信**する（`auto_approve` を監査ログに残す）。
+  問題のある企業は 1 社も送られず、**理由付きで「保留」に並ぶ**（② で手直しして再プレビューすれば自動で対象に戻る）。
+- **随時送信** — 送信対象を開始時に固定せず、送るたびに候補を取り直す。したがって
+  **取り込み（L0→L1→L2→Plan）が走っている途中でも、準備ができた企業から順に送信される**。
+  取り込みが終わり候補が尽きた時点で自然に終了する。取り込みタブの「取り込みと同時に自動送信」を
+  オンにすると、取り込み開始と同時にこのワーカーが起動する（既定 OFF）。
+- 送信間隔・日次上限・送信可能時間帯（§9 pacing）は従来どおり全て通る。時間外・上限到達時は
+  ワーカーが**待機**し、窓が開いたら自動で再開する（「■ 中断」でいつでも止められる）。
+- 送信直前にもう一度同じ判定をかけるので、判定後に編集・却下・抑制された企業は送られない。
+
+API: `GET /api/sendable`（送信可能／保留の一覧と理由）/ `POST /api/execute-all`（`{follow:true}` で随時送信）/
+`POST /api/execute-all/stop` / `GET /api/execute-all/status` / `POST /api/companies/:id/send`（同じゲートを通す単体送信）。
+
 ### B — 実ドメインでのL1発見バッチ
 
 ```bash
@@ -264,13 +317,21 @@ Editor共有すれば有効化。未設定なら警告してスキップ（CSV�
 発見→解析→入力→確認画面→スクショ→送信→成功判定を通す。
 
 ```bash
-npm run e2e        # 全チェック PASS を確認
-npm run testform   # テストフォームをブラウザで手動確認したい場合
+npm run e2e            # 全チェック PASS を確認
+npm run testform       # テストフォームをブラウザで手動確認したい場合
+npm run smoke:sendgate # 送信可否ゲートと /api/sendable（ブラウザ・送信なし・数秒）
+npm run smoke:bulksend # 一斉送信：問題なしの企業だけを実送信し、問題ありは未送信のまま
 ```
 
 ## データモデル / 状態遷移
 
-- スキーマ: [src/db/schema.sql](src/db/schema.sql)（companies / field_maps / submissions / suppression / audit_log / send_ledger）
+- スキーマ: [src/db/schema.sql](src/db/schema.sql)（companies / field_maps / submissions / suppression /
+  audit_log / send_ledger / **import_jobs / import_rows / hp_resolutions**）
+  - `import_jobs` / `import_rows` … 取り込みジョブのセーブデータ（中断・再開の単位）
+  - `hp_resolutions` … 会社名→公式HP 探索結果のキャッシュ（見つからなかった結果も保存）
+- 接続設定: [src/db/db.ts](src/db/db.ts) — WAL + `synchronous=NORMAL`、プリペア済みステートメントの
+  キャッシュ（`prep()`）とトランザクション補助（`tx()`）。大量 upsert は必ず `tx()` でまとめる
+  （1行1トランザクションだと3万件で30秒以上、その間プロセス全体が止まる）
 - ステートマシン: [src/core/stateMachine.ts](src/core/stateMachine.ts)（§7、不正遷移をガードし全遷移を監査ログへ）
 - ゲート: [src/core/gate.ts](src/core/gate.ts)（発見×マッピング×アンチボットリスクの合成で high/mid/low/block）
 

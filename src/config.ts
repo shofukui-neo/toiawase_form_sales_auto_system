@@ -99,6 +99,15 @@ export interface AppConfig {
   sendMinIntervalMs: number;
   sendMaxIntervalMs: number;
   headless: boolean;
+  /** リスト取り込み (L0) のバッチ／並列度チューニング。 */
+  intake: {
+    /** Rows committed per transaction + per progress checkpoint. */
+    chunkSize: number;
+    /** Companies discovered/parsed in parallel during the pipeline phase. */
+    concurrency: number;
+    /** Parallel HP auto-discovery lookups (each is several web requests). */
+    resolveConcurrency: number;
+  };
   sheets: {
     spreadsheetId: string | null;
     keyFile: string | null; // service-account JSON path
@@ -137,6 +146,11 @@ export const config: AppConfig = {
   sendMinIntervalMs: envInt('SEND_MIN_INTERVAL_MS', 45000),
   sendMaxIntervalMs: envInt('SEND_MAX_INTERVAL_MS', 120000),
   headless: envBool('HEADLESS', true),
+  intake: {
+    chunkSize: Math.max(1, envInt('INTAKE_CHUNK_SIZE', 500)),
+    concurrency: Math.max(1, envInt('INTAKE_CONCURRENCY', 3)),
+    resolveConcurrency: Math.max(1, envInt('INTAKE_RESOLVE_CONCURRENCY', 2)),
+  },
   sheets: {
     spreadsheetId: process.env.SHEETS_SPREADSHEET_ID || null,
     keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS || null,
@@ -158,7 +172,20 @@ export interface IcpConfig {
   competitorAts: string[];
 }
 
+let _icp: IcpConfig | null = null;
+
+/**
+ * ICP config, memoised. Scoring runs once per imported row, so re-reading and
+ * re-parsing icp.json 3万回 is pure overhead — call {@link clearIcpCache} after
+ * editing the file in a long-lived process.
+ */
 export function loadIcp(): IcpConfig {
+  if (_icp) return _icp;
   const raw = readFileSync(resolve(ROOT, 'config/icp.json'), 'utf8');
-  return JSON.parse(raw) as IcpConfig;
+  _icp = JSON.parse(raw) as IcpConfig;
+  return _icp;
+}
+
+export function clearIcpCache(): void {
+  _icp = null;
 }

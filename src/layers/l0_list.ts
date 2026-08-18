@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { companies, suppression, audit } from '../db/repositories.js';
+import { companies, suppression, audit, hpCache } from '../db/repositories.js';
+import { tx } from '../db/db.js';
 import { transition } from '../core/stateMachine.js';
 import { loadIcp, type IcpConfig } from '../config.js';
 import { normalizeDomain } from '../utils/url.js';
-import { resolveHomepage } from './l0_homepage.js';
+import { resolveHomepage, type HomepageResult } from './l0_homepage.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L0');
@@ -34,6 +35,8 @@ export interface IngestResult {
   ingested: number;
   suppressed: number;
   skipped: number;
+  /** Rows whose company was already in the DB and was left untouched. */
+  alreadyKnown: number;
   /** Rows dropped for having no domain (name-only rows without --resolve). */
   noDomain: string[];
   /** One domain claimed by two or more differently-named rows — almost always a
@@ -85,6 +88,20 @@ function detectDelimiter(text: string): string {
 /** Minimal CSV parser (handles quoted fields + separators inside quotes). */
 function parseCsv(text: string): string[][] {
   const delim = detectDelimiter(text);
+  // Fast path: no quoting anywhere in the file (the common shape of a
+  // spreadsheet paste / CRM export), so a field can never contain the delimiter
+  // or a newline. split() runs in native code — on a 3万行リスト that is roughly
+  // an order of magnitude cheaper than the char-by-char accumulator below,
+  // which allocates a new string per character.
+  if (text.indexOf('"') === -1) {
+    const out: string[][] = [];
+    for (const line of text.split(/\r\n|\r|\n/)) {
+      if (line === '') continue;
+      out.push(line.split(delim));
+    }
+    return out;
+  }
+
   const rows: string[][] = [];
   let field = '';
   let row: string[] = [];
@@ -209,23 +226,40 @@ function looksLikeHeader(row: string[]): boolean {
   return cells.some(isHeaderCell);
 }
 
+/** Rows + the column mapping they were read with, from a single parse. */
+export interface ParsedList {
+  rows: IngestRow[];
+  /** canonical key -> the header label it was taken from ({} when headerless). */
+  columns: Record<string, string>;
+}
+
 /** Which canonical columns a header row resolves to — surfaced in the intake
  * preview so a mis-mapped list is visible before it is committed. */
 export function detectColumns(text: string): Record<string, string> {
-  const table = parseCsv(text);
-  if (table.length === 0 || !looksLikeHeader(table[0])) return {};
-  const idx = headerIndex(table[0]);
-  const out: Record<string, string> = {};
-  for (const [key, i] of Object.entries(idx)) out[key] = table[0][i]?.trim() ?? '';
-  return out;
+  return parseCompaniesList(text).columns;
 }
 
 /** Parse a companies CSV into raw rows (name required; domain may be empty). */
 export function parseCompaniesCsv(text: string): IngestRow[] {
+  return parseCompaniesList(text).rows;
+}
+
+/**
+ * Parse once, return both the rows and the recognised columns.
+ *
+ * The intake preview used to call `parseCompaniesCsv` and `detectColumns`
+ * separately, and the import handler parsed a third time — three full passes
+ * over a multi-megabyte list per keystroke-debounced preview.
+ */
+export function parseCompaniesList(text: string): ParsedList {
   const table = parseCsv(text);
-  if (table.length === 0) return [];
+  if (table.length === 0) return { rows: [], columns: {} };
   const hasHeader = looksLikeHeader(table[0]);
   const idx = hasHeader ? headerIndex(table[0]) : {};
+  const columns: Record<string, string> = {};
+  if (hasHeader) {
+    for (const [key, i] of Object.entries(idx)) columns[key] = table[0][i]?.trim() ?? '';
+  }
   const dataRows = hasHeader ? table.slice(1) : table;
   // Positional fallbacks (name=0, domain=1) apply ONLY to headerless files — with
   // a header we must not guess a column that isn't declared (else industry would
@@ -234,19 +268,23 @@ export function parseCompaniesCsv(text: string): IngestRow[] {
     const i = idx[key] ?? (hasHeader ? undefined : headerlessIdx);
     return i !== undefined ? cols[i] : undefined;
   };
-  return dataRows
-    .map((cols): IngestRow => ({
-      name: (pick(cols, 'name', 0) ?? '').trim(),
+  const rows: IngestRow[] = [];
+  for (const cols of dataRows) {
+    const name = (pick(cols, 'name', 0) ?? '').trim();
+    if (!name) continue;
+    const employeesRaw = pick(cols, 'employees');
+    rows.push({
+      name,
       domain: (pick(cols, 'domain', 1) ?? '').trim(),
       industry: pick(cols, 'industry')?.trim() || undefined,
-      employees: (() => {
-        const v = pick(cols, 'employees');
-        return v ? Number.parseInt(v.replace(/[^\d]/g, ''), 10) || undefined : undefined;
-      })(),
+      employees: employeesRaw
+        ? Number.parseInt(employeesRaw.replace(/[^\d]/g, ''), 10) || undefined
+        : undefined,
       source: pick(cols, 'source')?.trim() || undefined,
       prefecture: pick(cols, 'prefecture')?.trim() || undefined,
-    }))
-    .filter((r) => r.name);
+    });
+  }
+  return { rows, columns };
 }
 
 /**
@@ -282,57 +320,127 @@ export function scoreIcp(row: IngestRow, icp: IcpConfig): { score: number; exclu
   return { score: Math.max(0, Math.min(1, Number(score.toFixed(3)))), excluded: false };
 }
 
-/** Ingest rows (already parsed) into the DB. */
-export function ingestRows(rows: IngestRow[]): IngestResult {
+/** What happened to a single row. Mirrors `import_rows.state`. */
+export type IngestOutcome = 'ingested' | 'known' | 'suppressed' | 'nodomain';
+
+export interface IngestOneResult {
+  outcome: IngestOutcome;
+  companyId?: number;
+  /** Normalized domain actually written (empty for `nodomain`). */
+  domain: string;
+  /** True when a dead-ended company was reset to NEW so it retries. */
+  requeued: boolean;
+  /** Human-readable note (why it was skipped / what state it was already in). */
+  detail?: string;
+}
+
+export interface IngestOneOptions {
+  /**
+   * Skip companies already present in `companies` instead of re-upserting and
+   * re-running the pipeline on them. This is what makes re-importing an
+   * overlapping list nearly free — the company was already saved on the first
+   * pass, so the second pass must not pay for it again.
+   */
+  skipKnown?: boolean;
+  icp?: IcpConfig;
+}
+
+/**
+ * Ingest exactly one row. The unit of work the resumable intake job commits in
+ * chunks; `ingestRows` is the in-memory batch wrapper around it.
+ */
+export function ingestOne(raw: IngestRow, opts: IngestOneOptions = {}): IngestOneResult {
+  const icp = opts.icp ?? loadIcp();
+  const name = raw.name?.trim();
+  const domain = normalizeDomain(raw.domain || '');
+  if (!domain || !name) {
+    return { outcome: 'nodomain', domain: '', requeued: false };
+  }
+
+  // Cheap index lookup before any write: a company we have already read keeps
+  // whatever state it reached, and (unless it dead-ended) is not re-processed.
+  const known = companies.refByDomain(domain);
+  if (known) {
+    if (RETRYABLE_STATUSES.has(known.status)) {
+      transition(known.id, 'NEW', { force: true, detail: 're-ingest retry' });
+      return {
+        outcome: 'ingested',
+        companyId: known.id,
+        domain,
+        requeued: true,
+        detail: '再取り込み（前回フォーム未発見/解析失敗）',
+      };
+    }
+    if (opts.skipKnown) {
+      return {
+        outcome: 'known',
+        companyId: known.id,
+        domain,
+        requeued: false,
+        detail: `取り込み済み（${known.status}）`,
+      };
+    }
+  }
+
+  const row: IngestRow = { ...raw, domain, name };
+  const { score, excluded } = scoreIcp(row, icp);
+  const company = companies.upsert({ name, domain, source: row.source, icpScore: score });
+
+  if (excluded) {
+    suppression.add(domain, 'competitor');
+    audit.log({ companyId: company.id, layer: 'L0', action: 'suppress:competitor', detail: name });
+    if (company.status !== 'SUPPRESSED') {
+      transition(company.id, 'SUPPRESSED', { force: true, detail: 'competitor/exclude at ingest' });
+    }
+    return { outcome: 'suppressed', companyId: company.id, domain, requeued: false, detail: '競合/除外キーワード' };
+  }
+  return { outcome: 'ingested', companyId: company.id, domain, requeued: false };
+}
+
+/**
+ * Ingest rows (already parsed) into the DB, in ONE transaction.
+ *
+ * Per-row autocommit meant one fsync per company: a 3万件 list took minutes and
+ * blocked the whole (single-threaded) process while it ran. Batched, the same
+ * list commits in seconds. For interactive imports use the resumable job in
+ * `pipeline/intake.ts` — it chunks this and checkpoints as it goes.
+ */
+export function ingestRows(rows: IngestRow[], opts: { skipKnown?: boolean } = {}): IngestResult {
   const icp = loadIcp();
   let ingested = 0;
   let suppressed = 0;
   let skipped = 0;
   let requeued = 0;
+  let alreadyKnown = 0;
   const noDomain: string[] = [];
   const companyIds: number[] = [];
   // domain -> distinct names seen in this batch, to catch a mis-mapped URL column.
   const byDomain = new Map<string, string[]>();
 
-  for (const raw of rows) {
-    const domain = normalizeDomain(raw.domain || '');
-    const name = raw.name?.trim();
-    if (!domain || !name) {
-      skipped++;
-      if (name) noDomain.push(name);
-      continue;
-    }
-    const names = byDomain.get(domain) ?? [];
-    if (!names.includes(name)) names.push(name);
-    byDomain.set(domain, names);
-
-    const row: IngestRow = { ...raw, domain, name };
-    const { score, excluded } = scoreIcp(row, icp);
-    const company = companies.upsert({
-      name,
-      domain,
-      source: row.source,
-      icpScore: score,
-    });
-    if (excluded) {
-      suppression.add(domain, 'competitor');
-      audit.log({ companyId: company.id, layer: 'L0', action: 'suppress:competitor', detail: name });
-      if (company.status !== 'SUPPRESSED') {
-        transition(company.id, 'SUPPRESSED', { force: true, detail: 'competitor/exclude at ingest' });
+  tx(() => {
+    for (const raw of rows) {
+      const r = ingestOne(raw, { icp, skipKnown: opts.skipKnown });
+      if (r.outcome === 'nodomain') {
+        skipped++;
+        if (raw.name?.trim()) noDomain.push(raw.name.trim());
+        continue;
       }
-      suppressed++;
-      continue;
+      const names = byDomain.get(r.domain) ?? [];
+      const name = raw.name.trim();
+      if (!names.includes(name)) names.push(name);
+      byDomain.set(r.domain, names);
+
+      if (r.requeued) requeued++;
+      if (r.outcome === 'suppressed') {
+        suppressed++;
+      } else if (r.outcome === 'known') {
+        alreadyKnown++;
+      } else {
+        companyIds.push(r.companyId!);
+        ingested++;
+      }
     }
-    // Re-importing a company whose previous run dead-ended (FORM_NOT_FOUND is a
-    // terminal state) must actually retry it — otherwise the row is upserted and
-    // then silently ignored, and it never reaches the approval queue.
-    if (RETRYABLE_STATUSES.has(company.status)) {
-      transition(company.id, 'NEW', { force: true, detail: 're-ingest retry' });
-      requeued++;
-    }
-    companyIds.push(company.id);
-    ingested++;
-  }
+  });
 
   const collisions = [...byDomain.entries()]
     .filter(([, names]) => names.length > 1)
@@ -342,8 +450,10 @@ export function ingestRows(rows: IngestRow[]): IngestResult {
     audit.log({ layer: 'L0', action: 'domain_collision', detail: `${c.domain}: ${c.names.join(' / ')}` });
   }
 
-  log.info(`ingested=${ingested} suppressed=${suppressed} skipped=${skipped} requeued=${requeued}`);
-  return { ingested, suppressed, skipped, noDomain, collisions, companyIds, requeued };
+  log.info(
+    `ingested=${ingested} known=${alreadyKnown} suppressed=${suppressed} skipped=${skipped} requeued=${requeued}`,
+  );
+  return { ingested, suppressed, skipped, alreadyKnown, noDomain, collisions, companyIds, requeued };
 }
 
 /** Ingest from a CSV file path. Rows without a domain are skipped. */
@@ -392,6 +502,52 @@ export async function ingestCsvWithResolve(
  * point the web intake job uses (list pasted / uploaded in the browser, parsed
  * client-side into rows, then resolved + ingested here).
  */
+/** Cache key for a name lookup — normalized so casing/spacing don't split it. */
+export function hpCacheKey(name: string, hints: { industry?: string; prefecture?: string } = {}): string {
+  const norm = (s?: string) => (s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return [norm(name), norm(hints.industry), norm(hints.prefecture)].join('|');
+}
+
+/**
+ * {@link resolveHomepage} with a persistent cache.
+ *
+ * Each lookup costs several search + fetch round-trips (seconds), which is what
+ * makes a 3万件 name-only list impossible to re-run. Results — *including
+ * misses* — are stored, so re-importing an overlapping list never repeats a
+ * search it has already done.
+ */
+export async function resolveHomepageCached(
+  name: string,
+  hints: { industry?: string; prefecture?: string } = {},
+): Promise<{ hp: HomepageResult | null; cached: boolean }> {
+  const key = hpCacheKey(name, hints);
+  const hit = hpCache.get(key);
+  if (hit) {
+    if (!hit.domain) return { hp: null, cached: true };
+    return {
+      cached: true,
+      hp: {
+        domain: hit.domain,
+        url: `https://${hit.domain}`,
+        confidence: hit.confidence ?? 0.5,
+        method: (hit.method as HomepageResult['method']) ?? 'search+unverified',
+        evidence: 'cached',
+        alternatives: [],
+      },
+    };
+  }
+  const hp = await resolveHomepage(name, hints).catch((e) => {
+    log.error(`resolve failed ${name}: ${(e as Error).message}`);
+    return null;
+  });
+  hpCache.set(key, {
+    domain: hp?.domain ?? null,
+    method: hp?.method ?? null,
+    confidence: hp?.confidence ?? null,
+  });
+  return { hp, cached: false };
+}
+
 export async function ingestRowsWithResolve(
   rows: IngestRow[],
   opts: ResolveIngestOptions = {},
@@ -408,12 +564,9 @@ export async function ingestRowsWithResolve(
       continue;
     }
     opts.onProgress?.(`resolving HP: ${row.name}`);
-    const hp = await resolveHomepage(row.name, {
+    const { hp } = await resolveHomepageCached(row.name, {
       industry: row.industry,
       prefecture: row.prefecture,
-    }).catch((e) => {
-      log.error(`resolve failed ${row.name}: ${(e as Error).message}`);
-      return null;
     });
 
     if (!hp) {

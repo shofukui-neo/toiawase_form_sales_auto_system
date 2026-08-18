@@ -283,6 +283,35 @@ program
   });
 
 program
+  .command('intake')
+  .description('リスト取り込みジョブの状況表示 / 中断したジョブの再開（3万件規模の分割処理）')
+  .option('--resume', '未完了のジョブを続きから再開する', false)
+  .option('--job <id>', '対象ジョブID（既定: 直近の未完了ジョブ）')
+  .action(async (o: { resume: boolean; job?: string }) => {
+    const { intakeStatus, resumeIntake } = await import('./pipeline/intake.js');
+    if (o.resume) {
+      const r = resumeIntake(o.job ? Number(o.job) : undefined);
+      console.log(`ジョブ #${r.jobId} を再開しました（全 ${r.total} 行）`);
+      // Keep the process alive until the job settles.
+      for (;;) {
+        const s = intakeStatus();
+        if (!s.running) break;
+        await sleep(2000);
+      }
+    }
+    const s = intakeStatus();
+    if (s.jobId === null) return console.log('取り込みジョブはありません');
+    console.log(
+      `\n=== 取り込みジョブ #${s.jobId} ===\n` +
+        `  状態         ${s.status} (${s.phase})\n` +
+        `  読み込み     ${s.ingestDone} / ${s.total} 行\n` +
+        `  取り込み     ${s.ingested}（既存スキップ ${s.alreadyKnown} / 除外 ${s.suppressed} / スキップ ${s.skipped}）\n` +
+        `  発見処理     ${s.done} / ${s.pipelineTotal}（承認待ち ${s.pendingApproval} / 未発見 ${s.notFound}）\n` +
+        (s.status === 'paused' ? `  → 続きから再開: toiawase intake --resume\n` : ''),
+    );
+  });
+
+program
   .command('serve')
   .description('A — launch the web approval dashboard')
   .option('-p, --port <n>', 'port', '4599')
@@ -302,12 +331,16 @@ function csvCell(v: string): string {
 }
 
 function printStatus(): void {
-  const all = companies.all();
-  const counts = new Map<CompanyStatus, number>();
-  for (const c of all) counts.set(c.status, (counts.get(c.status) ?? 0) + 1);
+  // Counted in SQLite — tallying `companies.all()` in JS silently stopped at the
+  // row limit, so a 3万件 DB reported a wrong (and much smaller) total.
+  const counts = companies.countsByStatus();
   console.log('\n=== pipeline status ===');
-  for (const [status, n] of [...counts.entries()].sort()) console.log(`  ${status.padEnd(20)} ${n}`);
-  console.log(`  ${'TOTAL'.padEnd(20)} ${all.length}\n`);
+  let total = 0;
+  for (const [status, n] of Object.entries(counts).sort()) {
+    console.log(`  ${status.padEnd(20)} ${n}`);
+    total += n;
+  }
+  console.log(`  ${'TOTAL'.padEnd(20)} ${total}\n`);
 }
 
 program.parseAsync(process.argv);

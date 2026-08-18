@@ -5,259 +5,36 @@ import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
 import { companies, submissions, fieldMaps, suppression, contentOverrides, audit } from '../db/repositories.js';
 import { listApproved, approve, reject, suppressCompany, excludeIneligiblePending } from '../pipeline/approval.js';
-import { runExecute, discoverAndParse, buildPlan } from '../pipeline/pipeline.js';
-import { detectColumns, ingestRows, ingestRowsWithResolve, parseCompaniesCsv, type IngestResult, type IngestRow, type UnresolvedRow } from '../layers/l0_list.js';
+import { runExecute } from '../pipeline/pipeline.js';
+import {
+  STATUS_JA,
+  defaultOptions,
+  intakeRows,
+  intakeStatus,
+  resumeIntake,
+  resumeUnfinishedOnBoot,
+  startIntake,
+  stopIntake,
+  type IntakeOptions,
+} from '../pipeline/intake.js';
+import { startBulkSend, stopBulkSend, bulkStatus, isBulkRunning } from '../pipeline/bulkSend.js';
+import { sendabilitySnapshot, assessSendReadiness } from '../pipeline/readiness.js';
+import { parseCompaniesList } from '../layers/l0_list.js';
+import type { ImportRowState } from '../db/repositories.js';
 import { normalizeDomain } from '../utils/url.js';
 import { renderContent } from '../layers/l3_content.js';
 import { planSubmission } from '../layers/l4_submit.js';
 import type { ContentOverride, FieldRole } from '../types.js';
-import { canSendNow, nextSendDelayMs } from '../crosscutting/pacing.js';
+import { canSendNow } from '../crosscutting/pacing.js';
 import { computeCoverage } from '../layers/coverage.js';
 import { classifyEligibility } from '../crosscutting/eligibility.js';
 import { transition } from '../core/stateMachine.js';
 import { buildReview } from './review.js';
-import type { CompanyRow, SuppressionReason } from '../types.js';
+import type { SuppressionReason } from '../types.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('web');
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/**
- * Bulk-send ("一斉送信") job state. A single click executes every APPROVED /
- * SUBMITTING company (the ones whose form is filled AND human-approved), reusing
- * the same per-send compliance + pacing gates as the CLI `execute` batch. The
- * job runs in the background so the request returns immediately and the
- * dashboard polls `/api/execute-all/status` for live progress.
- */
-interface BulkResult {
-  companyId: number;
-  name: string;
-  status: string;
-  detail: string;
-}
-interface BulkState {
-  running: boolean;
-  total: number;
-  done: number;
-  success: number;
-  failed: number;
-  skipped: number;
-  current: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-  results: BulkResult[];
-}
-let bulk: BulkState | null = null;
-
-/** Sequentially execute a batch with pacing between sends; updates `bulk`. */
-async function runBulk(batch: CompanyRow[]): Promise<void> {
-  bulk = {
-    running: true,
-    total: batch.length,
-    done: 0,
-    success: 0,
-    failed: 0,
-    skipped: 0,
-    current: null,
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    results: [],
-  };
-  for (let i = 0; i < batch.length; i++) {
-    const c = companies.byId(batch[i].id);
-    // Skip anything no longer sendable (rejected/suppressed/already sent between clicks).
-    if (!c || !['APPROVED', 'SUBMITTING'].includes(c.status)) {
-      bulk.done++;
-      continue;
-    }
-    // Stop early if the send window closed or the daily cap filled mid-run —
-    // mark the rest as skipped rather than looping through no-op sends.
-    const pace = canSendNow();
-    if (!pace.allowed) {
-      for (let j = i; j < batch.length; j++) {
-        const rest = companies.byId(batch[j].id);
-        bulk.results.push({
-          companyId: batch[j].id,
-          name: rest?.name ?? String(batch[j].id),
-          status: 'skipped',
-          detail: pace.reason ?? '',
-        });
-      }
-      bulk.skipped += batch.length - i;
-      bulk.done = batch.length;
-      break;
-    }
-    bulk.current = `#${c.id} ${c.name}`;
-    try {
-      await runExecute(c.id);
-      const after = companies.byId(c.id);
-      const st = after?.status ?? 'unknown';
-      bulk.results.push({ companyId: c.id, name: c.name, status: st, detail: '' });
-      if (st === 'SUBMITTED_SUCCESS') bulk.success++;
-      else if (st === 'APPROVED' || st === 'SUBMITTING') bulk.skipped++; // pacing/no-op, retry next run
-      else bulk.failed++;
-    } catch (e) {
-      bulk.results.push({ companyId: c.id, name: c.name, status: 'error', detail: (e as Error).message });
-      bulk.failed++;
-    }
-    bulk.done++;
-    // Pacing: random inter-send delay, but not after the last one (§9 anti-burst).
-    if (i < batch.length - 1) await sleep(nextSendDelayMs());
-  }
-  bulk.current = null;
-  bulk.running = false;
-  bulk.finishedAt = new Date().toISOString();
-}
-
-/**
- * リスト取り込み ("intake") job state. One click ingests a pasted / uploaded
- * company list (L0) and — optionally — runs the discovery + plan pipeline
- * (L1→L4 Plan) so companies flow straight into the approval queue. Runs in the
- * background (Playwright discovery is slow); the dashboard polls
- * `/api/import/status` for live progress. Never sends anything — final submit
- * still goes through the approval UI.
- */
-interface IntakeLog {
-  company: string;
-  status: string;
-  detail?: string;
-}
-interface IntakeState {
-  running: boolean;
-  /** ingest → resolve → pipeline → done */
-  phase: 'ingest' | 'resolve' | 'pipeline' | 'done';
-  message: string;
-  // L0 ingest tallies
-  ingested: number;
-  suppressed: number;
-  skipped: number;
-  hadDomain: number;
-  resolved: number;
-  requeued: number;
-  unresolved: UnresolvedRow[];
-  /** Names dropped for having no domain (HP自動探索 off). */
-  noDomain: string[];
-  /** Mis-mapped-column warning: one domain claimed by several companies. */
-  collisions: { domain: string; names: string[] }[];
-  // pipeline (discover + plan) tallies
-  pipeline: boolean;
-  total: number;
-  done: number;
-  current: string | null;
-  pendingApproval: number;
-  notFound: number;
-  failed: number;
-  excluded: number;
-  logs: IntakeLog[];
-  /** Fatal error that ended the job early. Null on a clean run. */
-  error: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-}
-let intake: IntakeState | null = null;
-
-interface IntakeOptions {
-  resolve: boolean;
-  acceptUnverified: boolean;
-  pipeline: boolean;
-}
-
-/** Human label for a company's pipeline status (used in the intake log). */
-const STATUS_JA: Record<string, string> = {
-  NEW: '新規', DISCOVERING: '発見中', FORM_FOUND: 'フォーム発見', PARSING: '解析中',
-  PARSED: '解析済み', PLAN_READY: 'プラン作成中', PENDING_APPROVAL: '承認待ち',
-  APPROVED: '承認済み', SUBMITTING: '送信準備', SUBMITTED_SUCCESS: '送信成功',
-  SUBMITTED_FAILED: '送信失敗', FORM_NOT_FOUND: 'フォーム未発見', PARSE_FAILED: '解析失敗',
-  CAPTCHA_BLOCKED: 'CAPTCHA', NEEDS_REVIEW: '要確認', REJECTED: '却下', SUPPRESSED: '除外',
-};
-
-/** Ingest a list, then (optionally) discover + plan each new company. Updates `intake`. */
-async function runIntake(rows: IngestRow[], opts: IntakeOptions): Promise<void> {
-  intake = {
-    running: true,
-    phase: opts.resolve ? 'resolve' : 'ingest',
-    message: opts.resolve ? 'HPを探索しながら取り込み中…' : '取り込み中…',
-    ingested: 0, suppressed: 0, skipped: 0, hadDomain: 0, resolved: 0, requeued: 0,
-    unresolved: [], noDomain: [], collisions: [],
-    pipeline: opts.pipeline,
-    total: 0, done: 0, current: null,
-    pendingApproval: 0, notFound: 0, failed: 0, excluded: 0,
-    logs: [],
-    error: null,
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-  };
-  try {
-    // ---- L0 ingest (optionally auto-resolving missing homepages) ----
-    let r: IngestResult;
-    if (opts.resolve) {
-      const rr = await ingestRowsWithResolve(rows, {
-        acceptUnverified: opts.acceptUnverified,
-        onProgress: (m) => { if (intake) intake.message = m; },
-      });
-      intake.hadDomain = rr.hadDomain; intake.resolved = rr.resolved; intake.unresolved = rr.unresolved;
-      r = rr;
-    } else {
-      r = ingestRows(rows);
-    }
-    intake.ingested = r.ingested; intake.suppressed = r.suppressed; intake.skipped = r.skipped;
-    intake.requeued = r.requeued; intake.noDomain = r.noDomain; intake.collisions = r.collisions;
-
-    // ---- L1 discover + L2 parse + L4 Plan for every freshly-ingested company ----
-    // Drive exactly the companies this run ingested — not every NEW row in the
-    // DB — so the progress counters match the list the operator just pasted.
-    if (opts.pipeline) {
-      intake.phase = 'pipeline';
-      intake.message = 'フォームを発見して確認プランを作成中…';
-      const batch = r.companyIds.map((id) => companies.byId(id)).filter((c): c is CompanyRow => !!c);
-      intake.total = batch.length;
-      for (const c0 of batch) {
-        const c = companies.byId(c0.id);
-        if (!c) { intake.done++; continue; }
-        // Already past discovery from an earlier import — leave it where it is,
-        // but say so instead of dropping it out of the tally silently.
-        if (c.status !== 'NEW') {
-          if (c.status === 'PENDING_APPROVAL' || c.status === 'SUBMITTING') intake.pendingApproval++;
-          intake.logs.push({
-            company: `#${c.id} ${c.name}`,
-            status: `${STATUS_JA[c.status] ?? c.status}（取り込み済み・処理をスキップ）`,
-          });
-          intake.done++;
-          continue;
-        }
-        intake.current = `#${c.id} ${c.name}`;
-        try {
-          await discoverAndParse(c.id);
-          if (companies.byId(c.id)?.status === 'PARSED') await buildPlan(c.id, { autoHighGate: true });
-        } catch (e) {
-          intake.logs.push({ company: `#${c.id} ${c.name}`, status: 'error', detail: (e as Error).message });
-        }
-        const st = companies.byId(c.id)?.status ?? 'unknown';
-        if (st === 'PENDING_APPROVAL' || st === 'SUBMITTING') intake.pendingApproval++;
-        else if (st === 'FORM_NOT_FOUND') intake.notFound++;
-        else if (st === 'PARSE_FAILED') intake.failed++;
-        else if (st === 'SUPPRESSED') intake.excluded++;
-        intake.logs.push({ company: `#${c.id} ${c.name}`, status: STATUS_JA[st] ?? st });
-        intake.done++;
-      }
-    }
-  } catch (e) {
-    // Without this the job just flips to 完了 with every counter at 0 and the
-    // operator is told the list imported fine when nothing was written.
-    const msg = (e as Error).message;
-    log.error(`intake failed: ${msg}`);
-    if (intake) intake.error = msg;
-  } finally {
-    if (intake) {
-      intake.phase = 'done';
-      intake.running = false;
-      intake.current = null;
-      intake.message = intake.error ? `失敗: ${intake.error}` : '完了';
-      intake.finishedAt = new Date().toISOString();
-    }
-  }
-}
 
 /**
  * A (spec §13-2): Web approval dashboard. Thin HTTP layer over the same
@@ -278,36 +55,75 @@ export function createServer() {
   app.get('/', (_req, res) => res.type('html').send(html));
 
   app.get('/api/status', (_req, res) => {
-    const counts: Record<string, number> = {};
-    for (const c of companies.all()) counts[c.status] = (counts[c.status] ?? 0) + 1;
+    // GROUP BY in SQLite — the old version fetched every company row and tallied
+    // in JS, which both capped at the query limit (wrong totals past 5,000社)
+    // and re-serialised the whole table on every dashboard refresh.
+    const counts: Record<string, number> = companies.countsByStatus();
     const pace = canSendNow();
     counts['_送信可'] = pace.allowed ? 1 : 0;
     res.json(counts);
   });
 
-  // リスト取り込み: parse a pasted / uploaded list and kick off a background
-  // intake job (L0 ingest → optional L1/L2/L4-Plan). Returns immediately; the
-  // dashboard polls /api/import/status.
+  // リスト取り込み: parse a pasted / uploaded list, SAVE it, and kick off a
+  // resumable background job (L0 ingest → optional L1/L2/L4-Plan). Returns as
+  // soon as the list is persisted; the dashboard polls /api/import/status.
   app.post('/api/import', (req, res) => {
-    if (intake?.running) {
-      return res.json({ started: 0, message: '取り込みはすでに実行中です', running: true });
-    }
     const text = String(req.body?.text ?? '');
-    const rows = parseCompaniesCsv(text);
+    const { rows } = parseCompaniesList(text);
     if (rows.length === 0) {
       return res.json({ started: 0, message: '企業が見つかりません（会社名の列が必要です）' });
     }
     const opts: IntakeOptions = {
+      ...defaultOptions(),
       resolve: req.body?.resolve === true,
       acceptUnverified: req.body?.acceptUnverified === true,
       pipeline: req.body?.pipeline !== false, // default on
+      skipKnown: req.body?.skipKnown !== false, // default on: 一度読んだ企業は再処理しない
     };
-    void runIntake(rows, opts).catch((e) => log.error(`intake failed: ${(e as Error).message}`));
-    log.info(`リスト取り込みを開始: ${rows.length} 社 (resolve=${opts.resolve} pipeline=${opts.pipeline})`);
-    return res.json({ started: rows.length });
+    try {
+      const { jobId, total } = startIntake(rows, opts);
+      log.info(`リスト取り込みを開始: job=#${jobId} ${total} 社 (resolve=${opts.resolve} pipeline=${opts.pipeline})`);
+      // 随時送信: 取り込みと並走して、準備できた（全項目クリアの）企業から送る。
+      let autoSend = false;
+      if (req.body?.autoSend === true && opts.pipeline) {
+        autoSend = startBulkSend({ follow: true, actor: `auto:${approver()}` }).started;
+        if (autoSend) log.info('取り込みと並走する自動送信を開始しました');
+      }
+      return res.json({ started: total, jobId, autoSend });
+    } catch (e) {
+      return res.json({ started: 0, message: (e as Error).message, running: true });
+    }
   });
 
-  app.get('/api/import/status', (_req, res) => res.json(intake ?? { running: false }));
+  app.get('/api/import/status', (_req, res) => res.json(intakeStatus()));
+
+  // 中断: stop at the next checkpoint. Everything processed so far is saved.
+  app.post('/api/import/stop', (_req, res) => {
+    const stopped = stopIntake();
+    res.json({ ok: stopped, message: stopped ? '次の区切りで中断します' : '実行中の取り込みはありません' });
+  });
+
+  // 再開: continue a paused / interrupted job from where it stopped.
+  app.post('/api/import/resume', (req, res) => {
+    try {
+      const jobId = req.body?.jobId ? Number(req.body.jobId) : undefined;
+      const r = resumeIntake(jobId);
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Paged per-row detail of a job (HP未特定 / スキップ の一覧). Never returned
+  // inline with the status poll — at 3万件 that payload alone kills the tab.
+  app.get('/api/import/rows', (req, res) => {
+    const jobId = Number(req.query.jobId ?? intakeStatus().jobId ?? 0);
+    if (!jobId) return res.json({ rows: [], total: 0 });
+    const state = String(req.query.state ?? 'unresolved') as ImportRowState;
+    const limit = Math.min(Number(req.query.limit ?? 200) || 200, 1000);
+    const offset = Math.max(Number(req.query.offset ?? 0) || 0, 0);
+    res.json(intakeRows(jobId, state, limit, offset));
+  });
 
   // Preview a pasted list without ingesting — how many rows parse, which columns
   // were recognised, and whether several companies would land on one domain
@@ -315,32 +131,45 @@ export function createServer() {
   // the mapping before committing.
   app.post('/api/import/preview', (req, res) => {
     const text = String(req.body?.text ?? '');
-    const rows = parseCompaniesCsv(text);
+    // One parse for rows AND columns (it used to be three passes over the text).
+    const { rows, columns } = parseCompaniesList(text);
     const byDomain = new Map<string, Set<string>>();
+    let withDomain = 0;
     for (const r of rows) {
       if (!r.domain) continue;
+      withDomain++;
       const d = normalizeDomain(r.domain);
-      (byDomain.get(d) ?? byDomain.set(d, new Set()).get(d)!).add(r.name);
+      let set = byDomain.get(d);
+      if (!set) byDomain.set(d, (set = new Set()));
+      // Cap per-domain name collection: a mis-mapped URL column puts all 3万件
+      // on one domain, and we only ever display a handful.
+      if (set.size < 5) set.add(r.name);
     }
-    res.json({
-      total: rows.length,
-      withDomain: rows.filter((r) => r.domain).length,
-      columns: detectColumns(text),
-      collisions: [...byDomain.entries()]
-        .filter(([, names]) => names.size > 1)
-        .map(([domain, names]) => ({ domain, names: [...names] })),
-      sample: rows.slice(0, 8),
-    });
+    const collisions: { domain: string; names: string[] }[] = [];
+    for (const [domain, names] of byDomain) {
+      if (names.size > 1 && collisions.length < 20) collisions.push({ domain, names: [...names] });
+    }
+    res.json({ total: rows.length, withDomain, columns, collisions, sample: rows.slice(0, 8) });
   });
 
-  // Every company with its pipeline status — the intake tab's overview table.
-  app.get('/api/companies', (_req, res) => {
-    res.json(
-      companies.all().map((c) => ({
+  // Companies with their pipeline status — the intake tab's overview table.
+  // Paged and filtered server-side: returning 3万行 of JSON on every tab switch
+  // is what made the dashboard hang on a large list.
+  app.get('/api/companies', (req, res) => {
+    const { rows, total } = companies.page({
+      q: req.query.q ? String(req.query.q) : '',
+      status: req.query.status ? String(req.query.status) : undefined,
+      limit: Number(req.query.limit ?? 200) || 200,
+      offset: Number(req.query.offset ?? 0) || 0,
+    });
+    res.json({
+      total,
+      grandTotal: companies.count(),
+      items: rows.map((c) => ({
         id: c.id, name: c.name, domain: c.domain, status: c.status,
         statusJa: STATUS_JA[c.status] ?? c.status, icpScore: c.icp_score, formUrl: c.form_url,
       })),
-    );
+    });
   });
 
   // Field-by-field review for each pending plan: what value goes into each
@@ -506,27 +335,74 @@ export function createServer() {
     }
   });
 
-  // 一斉送信: fire-and-forget bulk send of every APPROVED/SUBMITTING company.
-  // Returns immediately; progress is polled from /api/execute-all/status.
-  app.post('/api/execute-all', (_req, res) => {
-    if (bulk?.running) {
+  // 単体送信（送信タブ）。一斉送信と同じゲートを通し、全項目クリアなら承認待ちの
+  // ままでも自動承認して送る。問題があれば理由を返して送らない。
+  app.post('/api/companies/:id/send', async (req, res) => {
+    const id = Number(req.params.id);
+    try {
+      const c = companies.byId(id);
+      if (!c) throw new Error(`company ${id} not found`);
+      const check = assessSendReadiness(c);
+      if (!check.ready) {
+        return res.status(400).json({
+          status: 'blocked',
+          detail: check.issues.map((i) => i.label).join(' / '),
+        });
+      }
+      if (c.status === 'PENDING_APPROVAL') {
+        approve(id, `auto:${approver()}`);
+        audit.log({ companyId: id, layer: 'L4', action: 'auto_approve', actor: approver(), detail: '全項目クリア（単体送信）' });
+      }
+      await runExecute(id);
+      res.json({ status: companies.byId(id)?.status, detail: '' });
+    } catch (e) {
+      res.status(500).json({ status: 'error', detail: (e as Error).message });
+    }
+  });
+
+  // 送信可否の一覧: 「全項目に問題なし」で一斉送信の対象になる企業と、
+  // 問題があって送信されない企業（理由付き）。取り込み中でも随時更新される。
+  app.get('/api/sendable', (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 200) || 200, 1000);
+    const snap = sendabilitySnapshot(limit);
+    const pace = canSendNow();
+    res.json({ ...snap, paceAllowed: pace.allowed, paceReason: pace.reason ?? null, sending: isBulkRunning() });
+  });
+
+  // 一斉送信: 全項目クリアの企業だけを、承認待ちのものも含めて順に送る。
+  // follow=true（既定）なら取り込み中の企業が準備でき次第そのまま送り続ける。
+  // 即座に返り、進捗は /api/execute-all/status をポーリングする。
+  app.post('/api/execute-all', (req, res) => {
+    if (isBulkRunning()) {
       return res.json({ started: 0, message: '一斉送信はすでに実行中です', running: true });
     }
-    const batch = [...companies.byStatus('APPROVED'), ...companies.byStatus('SUBMITTING')];
-    if (batch.length === 0) {
-      return res.json({ started: 0, message: '送信対象（承認済み）がありません' });
+    const follow = req.body?.follow !== false;
+    const limit = Number(req.body?.limit) || undefined;
+    // 送信待ちが 1 社も無く、取り込みも動いていないなら押し損 — その場で伝える。
+    // truncated（候補が上位 N 社で打ち切られている）場合は「0 社」と断定できないので、
+    // ワーカーに全件走査させる。
+    const snap = sendabilitySnapshot(200);
+    if (snap.readyCount === 0 && !snap.truncated && !intakeStatus().running) {
+      return res.json({
+        started: 0,
+        message: snap.candidateTotal
+          ? `送信できる企業がありません（${snap.blockedCount} 社は項目に問題あり）`
+          : '送信対象がありません',
+      });
     }
-    const pace = canSendNow();
-    if (!pace.allowed) {
-      return res.json({ started: 0, message: `送信できません: ${pace.reason}` });
-    }
-    void runBulk(batch).catch((e) => log.error(`bulk send failed: ${(e as Error).message}`));
-    log.info(`一斉送信を開始: ${batch.length} 社`);
-    return res.json({ started: batch.length });
+    const r = startBulkSend({ follow, limit, actor: `auto:${approver()}` });
+    if (!r.started) return res.json({ started: 0, message: r.message, running: true });
+    log.info(`一斉送信を開始 (follow=${follow}) — 送信可能 ${snap.readyCount} 社`);
+    return res.json({ started: snap.readyCount || 1, follow, message: r.message });
+  });
+
+  app.post('/api/execute-all/stop', (_req, res) => {
+    const stopped = stopBulkSend();
+    res.json({ ok: stopped, message: stopped ? '次の送信区切りで中断します' : '実行中の一斉送信はありません' });
   });
 
   app.get('/api/execute-all/status', (_req, res) => {
-    res.json(bulk ?? { running: false });
+    res.json(bulkStatus());
   });
 
   // Body-parser failures (oversized list, truncated JSON) otherwise answer with an
@@ -553,5 +429,12 @@ export function serve(port = 4599): void {
   app.listen(port, () => {
     log.info(`承認ダッシュボード: http://localhost:${port}`);
     console.log(`\n  📮 承認ダッシュボードを起動しました → http://localhost:${port}\n`);
+    // A list of 3万件 outlives any single process run. If the previous one was
+    // killed mid-import, pick it up from the last checkpoint instead of asking
+    // the operator to paste (and re-process) the whole list again.
+    const resumed = resumeUnfinishedOnBoot(true);
+    if (resumed) {
+      console.log(`  ↻ 未完了の取り込み #${resumed.id} を再開しました（続きから処理します）\n`);
+    }
   });
 }

@@ -18,7 +18,9 @@
     "testform": "tsx scripts/test_form_server.ts",
     "seed": "tsx scripts/seed_demo.ts",
     "purge-demo": "tsx scripts/purge_demo.ts",
-    "e2e": "tsx scripts/e2e_local.ts"
+    "e2e": "tsx scripts/e2e_local.ts",
+    "smoke:sendgate": "tsx scripts/smoke_readiness.ts",
+    "smoke:bulksend": "tsx scripts/smoke_bulksend.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

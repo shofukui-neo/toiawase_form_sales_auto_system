@@ -179,7 +179,7 @@
   <nav class="tabs">
     <button class="tab-btn active" data-tab="import">① リスト取り込み</button>
     <button class="tab-btn" data-tab="review">② 確認・承認 <span class="pill" id="pendingPill">0</span></button>
-    <button class="tab-btn" data-tab="send">③ 送信 <span class="pill" id="approvedPill">0</span></button>
+    <button class="tab-btn" data-tab="send">③ 送信 <span class="pill" id="readyPill">0</span></button>
   </nav>
 
   <div class="wrap">
@@ -199,6 +199,7 @@
           <label class="filebtn">📄 CSV / テキストを選択
             <input type="file" id="csvfile" accept=".csv,.txt,text/csv,text/plain" hidden>
           </label>
+          <button id="clearList" type="button">クリア</button>
           <span class="hint" id="filename" style="margin:0"></span>
         </div>
         <textarea id="importText" placeholder="株式会社サンプル,sample.co.jp&#10;テスト工業株式会社,&#10;例示ホールディングス,example.com,IT,320,東京都"></textarea>
@@ -217,10 +218,20 @@
             <span>取り込み後に自動でフォーム発見 → 確認プランを作成
               <span class="sub">オンにすると、取り込んだ企業のフォームを探し、送信内容のプレビューまで生成して「② 確認・承認」に並べます（送信はしません）。</span></span>
           </label>
+          <label><input type="checkbox" id="optAutoSend">
+            <span>取り込みと同時に「問題のない企業」から自動で送信する（随時送信）
+              <span class="sub">取り込み・フォーム発見と並走して一斉送信を走らせます。<b>すべての項目に問題がない企業だけ</b>が対象で、必須の未入力・誤り疑い・非適格フォームがある企業は送信されません（「③ 送信」で理由を確認できます）。送信間隔・日次上限・送信可能時間帯は維持されます。</span></span>
+          </label>
+          <label><input type="checkbox" id="optSkipKnown" checked>
+            <span>すでに取り込んだ企業はスキップする
+              <span class="sub">一度読み込んだ企業は保存されています。オンなら重複分を処理しないので、同じリストを再取り込みしても一瞬で終わります（前回フォーム未発見・解析失敗だった企業のみ再挑戦します）。</span></span>
+          </label>
         </div>
 
         <div class="import-actions">
           <button id="importBtn" class="primary">取り込み開始</button>
+          <button id="stopBtn" style="display:none">■ 中断</button>
+          <button id="resumeBtn" style="display:none">▶ 続きから再開</button>
           <span class="hint" id="importMsg" style="margin:0"></span>
         </div>
 
@@ -238,6 +249,8 @@
       <div class="section-title">取り込み済み企業（パイプライン状況）</div>
       <div class="filterbar">
         <input type="text" id="ovFilter" placeholder="会社名・ドメインで絞り込み">
+        <button id="ovPrev">← 前</button>
+        <button id="ovNext">次 →</button>
         <span class="hint" id="ovCount" style="margin:0"></span>
       </div>
       <div class="ovwrap">
@@ -261,12 +274,39 @@
 
     <!-- ========================= ③ 送信 ========================= -->
     <section class="tab" id="tab-send">
-      <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <span>承認済み・送信可（APPROVED）</span>
-        <button id="sendAll" class="primary" style="margin-left:auto">🚀 一斉送信</button>
-        <span id="bulkProgress" style="font-size:12px;color:var(--muted);text-transform:none;letter-spacing:0"></span>
+      <div class="panel">
+        <h2>一斉送信</h2>
+        <p class="hint">
+          <b>すべての項目に問題がない企業だけ</b>を送信します。
+          必須の未入力・誤り疑い・非適格フォーム・抑制対象のいずれかがある企業は自動的に除外され、下の「保留」に理由付きで並びます。<br>
+          取り込みと並走できます — 取り込み中に準備ができた企業から随時送信されます。送信間隔・日次上限・送信可能時間帯は常に維持されます。
+        </p>
+        <div class="statgrid" id="sendStats"></div>
+        <div class="import-actions">
+          <button id="sendAll" class="primary">🚀 一斉送信（問題なしの企業のみ）</button>
+          <button id="stopSend" style="display:none">■ 中断</button>
+          <span class="hint" id="bulkProgress" style="margin:0"></span>
+        </div>
+        <div id="bulkWrap" style="display:none">
+          <div class="logbox" id="bulkLog"></div>
+        </div>
       </div>
-      <div id="approved"></div>
+
+      <div class="section-title" id="sendableTitle">送信可能（全項目クリア）</div>
+      <div class="ovwrap">
+        <table class="overview">
+          <thead><tr><th>#</th><th>会社名</th><th>ドメイン</th><th>gate</th><th>必須</th><th>備考</th><th></th></tr></thead>
+          <tbody id="sendableBody"></tbody>
+        </table>
+      </div>
+
+      <div class="section-title" id="blockedTitle" style="display:none">保留（項目に問題があるため送信されません）</div>
+      <div class="ovwrap" id="blockedWrap" style="display:none">
+        <table class="overview">
+          <thead><tr><th>#</th><th>会社名</th><th>ドメイン</th><th>送信できない理由</th><th>状態</th></tr></thead>
+          <tbody id="blockedBody"></tbody>
+        </table>
+      </div>
     </section>
   </div>
 
@@ -296,6 +336,7 @@
       document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
       document.querySelectorAll('.tab').forEach(s=>s.classList.toggle('active', s.id==='tab-'+name));
       if(name==='import') loadCompanies();
+      if(name==='send') load();
     }
     document.querySelectorAll('.tab-btn').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
 
@@ -390,13 +431,55 @@
       </div>`;
     }
 
-    function approvedCard(it){
-      return `<div class="card" data-id="${it.companyId}">
-        <div class="chead"><h2>#${it.companyId} ${esc(it.name)}</h2>
-          <span class="badge g-${it.gate}">gate: ${esc(it.gate)}</span>
-          <span class="domain">承認者: ${esc(it.approvedBy||'-')}</span><div class="spacer"></div></div>
-        <div class="actions"><button class="primary" onclick="act(${it.companyId},'execute')">送信実行</button></div>
-      </div>`;
+    // ---- ③ 送信タブ: 送信可否の一覧 ----
+    function sendableRow(r){
+      const cov = r.coverage;
+      const notes = r.warnings.length
+        ? r.warnings.map(w=>`<span class="chip warn">${esc(w.label)}</span>`).join(' ')
+        : '<span class="chip good">問題なし</span>';
+      return `<tr>
+        <td>${r.companyId}</td>
+        <td>${esc(r.name)}${r.needsApproval?' <span class="chip">未承認（送信時に自動承認）</span>':''}</td>
+        <td class="ftype">${esc(r.domain)}</td>
+        <td><span class="badge g-${esc(r.gate)}">${esc(r.gate)}</span></td>
+        <td>${cov?`${cov.requiredFilled}/${cov.requiredTotal}`:'—'}</td>
+        <td>${notes}</td>
+        <td style="white-space:nowrap">
+          ${r.formUrl?`<a class="formlink" href="${esc(r.formUrl)}" target="_blank" rel="noopener">フォーム ↗</a> `:''}
+          <button onclick="act(${r.companyId},'send-one')">送信</button></td>
+      </tr>`;
+    }
+
+    function blockedRow(r){
+      const why = r.issues.map(i=>
+        `<div><span class="chip bad">${esc(i.label)}</span>${i.detail?`<span class="fnote"> ${esc(i.detail)}</span>`:''}</div>`).join('');
+      return `<tr>
+        <td>${r.companyId}</td>
+        <td>${esc(r.name)}</td>
+        <td class="ftype">${esc(r.domain)}</td>
+        <td>${why}</td>
+        <td>${esc(r.statusJa)}</td>
+      </tr>`;
+    }
+
+    function renderSendable(s){
+      $('#readyPill').textContent = s.readyCount;
+      $('#sendStats').innerHTML = [
+        stat(num(s.readyCount), '送信可能（全項目クリア）', 'ok'),
+        stat(num(s.blockedCount), '保留（項目に問題）', s.blockedCount?'warn':''),
+        stat(num(s.candidateTotal), '候補総数'),
+        stat(s.paceAllowed?'可':'不可', '送信時間帯', s.paceAllowed?'ok':'bad'),
+      ].join('');
+      $('#sendableTitle').innerHTML = `送信可能（全項目クリア） ${num(s.readyCount)} 社`
+        + (s.truncated?` <span class="hint">— 候補 ${num(s.candidateTotal)} 社のうち ICP 上位 ${num(s.scanned)} 社を表示（一斉送信は全件を対象にします）</span>`:'');
+      $('#sendableBody').innerHTML = s.ready.length
+        ? s.ready.map(sendableRow).join('')
+        : `<tr><td colspan="7" class="empty">送信できる企業はありません${s.blockedCount?'（下の「保留」を確認してください）':''}</td></tr>`;
+      const hasBlocked = s.blocked.length > 0;
+      $('#blockedTitle').style.display = hasBlocked ? 'block' : 'none';
+      $('#blockedWrap').style.display = hasBlocked ? 'block' : 'none';
+      $('#blockedTitle').textContent = `保留（項目に問題があるため送信されません） ${num(s.blockedCount)} 社`;
+      $('#blockedBody').innerHTML = s.blocked.map(blockedRow).join('');
     }
 
     const EXCL_REASON = { captcha:'CAPTCHA必須', no_sales_policy:'営業お断り', consumer_form:'消費者向け/非B2B', unfillable_required:'入力不能な必須あり', not_contactable:'本文/会社名の入力先なし' };
@@ -411,17 +494,17 @@
     }
 
     async function load(){
-      const [status, pending, approved, excluded] = await Promise.all([ api('/api/status'), api('/api/pending'), api('/api/approved'), api('/api/excluded') ]);
+      const [status, pending, sendable, excluded] = await Promise.all([
+        api('/api/status'), api('/api/pending'), api('/api/sendable?limit=200'), api('/api/excluded') ]);
       const pace = status['_送信可'];
       const parts = Object.entries(status).filter(([k])=>k!=='_送信可').map(([k,v])=>`${k}: <b>${v}</b>`);
       parts.push(pace ? '<span class="pace-ok">● 送信可能時間帯</span>' : '<span class="pace-no">● 送信時間外</span>');
       $('#counts').innerHTML = parts.join(' · ');
       $('#pendingPill').textContent = pending.length;
-      $('#approvedPill').textContent = approved.length;
+      renderSendable(sendable);
       $('#pending').innerHTML = pending.length ? pending.map(pendingCard).join('') : '<div class="empty">承認待ちはありません</div>';
       $('#excluded-title').style.display = excluded.length ? 'block' : 'none';
       $('#excluded').innerHTML = excluded.map(excludedCard).join('');
-      $('#approved').innerHTML = approved.length ? approved.map(approvedCard).join('') : '<div class="empty">承認済みはありません</div>';
     }
 
     async function act(id, action){
@@ -429,6 +512,7 @@
         if(action==='approve'){ await api(`/api/companies/${id}/approve`,'POST'); toast(`#${id} を承認しました`); }
         else if(action==='reject'){ if(!confirm(`#${id} を却下しますか？`))return; await api(`/api/companies/${id}/reject`,'POST'); toast(`#${id} を却下しました`); }
         else if(action==='execute'){ toast(`#${id} 送信中…`); const r=await api(`/api/companies/${id}/execute`,'POST'); toast(`#${id}: ${r.status} ${r.detail||''}`.slice(0,90)); }
+        else if(action==='send-one'){ if(!confirm(`#${id} に送信します。よろしいですか？`))return; toast(`#${id} 送信中…`); const r=await api(`/api/companies/${id}/send`,'POST'); toast(`#${id}: ${r.status} ${r.detail||''}`.slice(0,90)); }
         else if(action==='approve-execute'){ if(!confirm(`#${id} を承認して即送信しますか？`))return; await api(`/api/companies/${id}/approve`,'POST'); toast(`#${id} 送信中…`); const r=await api(`/api/companies/${id}/execute`,'POST'); toast(`#${id}: ${r.status}`); }
         else if(action==='requeue'){ await api(`/api/companies/${id}/requeue`,'POST'); toast(`#${id} をキューに戻しました`); }
         await load();
@@ -476,44 +560,76 @@
       catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
 
-    // ---- 一斉送信 ----
+    // ---- 一斉送信（全項目クリアの企業のみ・取り込みと並走可）----
     let bulkTimer = null;
+
     async function sendAll() {
-      let approved = [];
-      try { approved = await api('/api/approved'); } catch (e) { toast('エラー: ' + e.message.slice(0,80)); return; }
-      if (!approved.length) { toast('承認済みの送信対象がありません'); return; }
-      if (!confirm(`承認済み ${approved.length} 社の問い合わせフォームに一斉送信します。\n送信間隔・日次上限・送信可能時間帯のルールは維持されます。\nよろしいですか？`)) return;
+      let snap;
+      try { snap = await api('/api/sendable?limit=200'); }
+      catch (e) { toast('エラー: ' + e.message.slice(0,80)); return; }
+      const importing = await api('/api/import/status').then(s=>!!s.running).catch(()=>false);
+      if (!snap.readyCount && !snap.truncated && !importing) {
+        toast(snap.blockedCount ? `送信できる企業がありません（${snap.blockedCount} 社は項目に問題あり）` : '送信対象がありません');
+        return;
+      }
+      const msg = [
+        `全項目に問題のない ${snap.readyCount} 社の問い合わせフォームに送信します。`,
+        snap.truncated ? `（表示は上位 ${snap.scanned} 社分。実際には候補 ${snap.candidateTotal} 社全体から問題のない企業を順に送ります）` : '',
+        importing ? '取り込み中の企業も、準備ができ次第随時送信します。' : '',
+        '承認待ちの企業も、項目に問題がなければ自動承認して送信します。',
+        '送信間隔・日次上限・送信可能時間帯のルールは維持されます。',
+        'よろしいですか？',
+      ].filter(Boolean).join('\n');
+      if (!confirm(msg)) return;
       const btn = $('#sendAll'); btn.disabled = true;
       try {
-        const r = await api('/api/execute-all', 'POST');
+        const r = await api('/api/execute-all', 'POST', { follow: true });
         if (!r.started) { toast(r.message || '送信対象がありません'); btn.disabled = false; return; }
-        toast(`一斉送信を開始しました（${r.started} 社）`); pollBulk();
+        toast(r.message || '一斉送信を開始しました'); pollBulk();
       } catch (e) { toast('エラー: ' + e.message.slice(0,80)); btn.disabled = false; }
     }
 
+    async function stopSend(){
+      try { const r = await api('/api/execute-all/stop','POST'); toast(r.message); }
+      catch(e){ toast('エラー: ' + e.message.slice(0,80)); }
+    }
+
     function renderBulk(s) {
-      const prog = $('#bulkProgress'); const btn = $('#sendAll');
-      if (s && s.running) {
-        btn.disabled = true;
-        prog.textContent = `送信中… ${s.done}/${s.total}（成功 ${s.success} / 失敗 ${s.failed} / スキップ ${s.skipped}）`
-          + (s.current ? ` – ${s.current}` : '');
-        return true;
+      const prog = $('#bulkProgress'), btn = $('#sendAll');
+      btn.disabled = !!s.running;
+      $('#stopSend').style.display = s.running ? '' : 'none';
+      const tally = `送信 ${s.success} / 失敗 ${s.failed}` + (s.skipped?` / 保留 ${s.skipped}`:'');
+      if (s.running) {
+        prog.textContent = `${s.stopping?'中断しています…':(s.current?`送信中: ${s.current}`:(s.message||'実行中'))} — ${tally}`;
+      } else if (s.startedAt) {
+        prog.textContent = `終了: ${tally}${s.stopReason?`（${s.stopReason}）`:''}`;
+      } else {
+        prog.textContent = '';
       }
-      btn.disabled = false;
-      if (s && s.total) prog.textContent = `完了: 成功 ${s.success} / 失敗 ${s.failed} / スキップ ${s.skipped}`;
-      return false;
+      if (s.results && s.results.length) {
+        $('#bulkWrap').style.display = 'block';
+        $('#bulkLog').innerHTML = s.results.slice(-60).reverse().map(r=>{
+          const okCls = r.status==='SUBMITTED_SUCCESS' ? 'var(--ok)' : (r.status==='skipped'?'var(--warn)':'var(--danger)');
+          const label = r.status==='SUBMITTED_SUCCESS' ? '送信成功' : (r.status==='skipped'?'保留':r.status);
+          return `<div>#${r.companyId} ${esc(r.name)} — <span style="color:${okCls}">${esc(label)}</span>${r.detail?' '+esc(r.detail):''}</div>`;
+        }).join('');
+      }
+      return !!s.running;
     }
 
     async function pollBulk() {
       if (bulkTimer) { clearInterval(bulkTimer); bulkTimer = null; }
+      // 進捗は 3 秒ごとだが、一覧の再評価（全候補の項目判定）は 15 秒ごとでよい —
+      // 送信は 1 社数十秒間隔なので、毎回回すのは無駄な負荷になる。
+      let ticks = 0;
       const tick = async () => {
         let s;
         try { s = await api('/api/execute-all/status'); } catch { return false; }
         const running = renderBulk(s);
-        await load();
+        if (!running || ticks++ % 5 === 0) await load();
         if (!running) {
           if (bulkTimer) { clearInterval(bulkTimer); bulkTimer = null; }
-          if (s && s.total) toast(`一斉送信 完了（成功 ${s.success} / 失敗 ${s.failed} / スキップ ${s.skipped}）`);
+          if (s && s.startedAt) toast(`一斉送信 終了（送信 ${s.success} / 失敗 ${s.failed} / 保留 ${s.skipped}）`);
         }
         return running;
       };
@@ -531,9 +647,38 @@
       previewTimer = setTimeout(runPreview, 350);
     }
     const COL_JA = { name:'会社名', domain:'サイト', industry:'業種', employees:'従業員', prefecture:'都道府県', source:'出典' };
+
+    /**
+     * 巨大リスト対策。3万件の CSV を textarea に流し込むと、DOM 側だけで数MBを
+     * 抱え、入力のたびに全文を JSON にして送り直すことになる（プレビューが毎回
+     * 数MBのPOST）。そこで全文は JS 変数に持ち、textarea には先頭だけを表示する。
+     */
+    let fullText = null;                 // ファイル/貼り付けの全文（null なら textarea が正）
+    const PREVIEW_LINES = 300;
+    const BIG_TEXT = 400 * 1024;         // これを超えたら自動プレビューを止める
+
+    function currentText(){
+      return fullText !== null ? fullText : $('#importText').value.trim();
+    }
+
+    function setFullText(text, label){
+      fullText = text;
+      const lines = text.split(/\r\n|\r|\n/);
+      if(text.length > BIG_TEXT || lines.length > PREVIEW_LINES){
+        $('#importText').value = lines.slice(0, PREVIEW_LINES).join('\n');
+        $('#importText').readOnly = true;
+        $('#filename').textContent = `${label} — ${lines.length.toLocaleString('ja-JP')} 行（表示は先頭 ${PREVIEW_LINES} 行・取り込みは全件）`;
+      } else {
+        $('#importText').value = text;
+        $('#importText').readOnly = false;
+        $('#filename').textContent = label;
+      }
+    }
+
     async function runPreview(){
-      const text = $('#importText').value.trim();
+      const text = currentText();
       if(!text){ $('#previewbar').textContent = ''; return; }
+      $('#previewbar').innerHTML = '解析中…';
       try{
         const p = await api('/api/import/preview','POST',{ text });
         const missing = p.total - p.withDomain;
@@ -584,68 +729,136 @@
       const reader = new FileReader();
       reader.onload = () => {
         const { text, enc } = decodeList(reader.result);
-        $('#importText').value = text;
-        $('#filename').textContent = `読み込み: ${f.name}（${enc}）`;
+        setFullText(text, `読み込み: ${f.name}（${enc}）`);
         runPreview();
       };
       reader.onerror = () => toast('ファイルを読み込めませんでした');
       reader.readAsArrayBuffer(f);
     });
-    $('#importText').addEventListener('input', schedulePreview);
+    $('#importText').addEventListener('input', ()=>{
+      // 手入力に切り替わったらファイル全文の保持をやめる。
+      if(!$('#importText').readOnly) fullText = null;
+      const text = $('#importText').value;
+      if(text.length > BIG_TEXT){
+        // 巨大な貼り付けは 1 文字ごとに全文を送り返さない — 明示操作でだけ解析する。
+        $('#previewbar').innerHTML = `<b>${text.split(/\r\n|\r|\n/).length.toLocaleString('ja-JP')}</b> 行を貼り付けました`
+          + ` — <a href="#" id="previewNow">列の対応を確認する</a>（取り込み開始でも自動確認されます）`;
+        return;
+      }
+      schedulePreview();
+    });
+    $('#previewbar').addEventListener('click', (e)=>{
+      if(e.target.id !== 'previewNow') return;
+      e.preventDefault();
+      runPreview();
+    });
+
+    // 巨大リストは textarea を先頭だけの読み取り専用表示にしているので、
+    // 別のリストに差し替えるための明示的なクリアを用意する。
+    $('#clearList').addEventListener('click', ()=>{
+      fullText = null;
+      $('#importText').value = '';
+      $('#importText').readOnly = false;
+      $('#csvfile').value = '';
+      $('#filename').textContent = '';
+      $('#previewbar').textContent = '';
+      $('#importText').focus();
+    });
 
     // Auto-enable "accept unverified" only makes sense with resolve on.
     $('#optResolve').addEventListener('change', ()=>{ $('#optUnverified').disabled = !$('#optResolve').checked; });
     $('#optUnverified').disabled = true;
 
     async function startImport(){
-      const text = $('#importText').value.trim();
+      const text = currentText();
       if(!text){ toast('リストを入力してください'); return; }
       const opts = {
         text,
         resolve: $('#optResolve').checked,
         acceptUnverified: $('#optResolve').checked && $('#optUnverified').checked,
         pipeline: $('#optPipeline').checked,
+        skipKnown: $('#optSkipKnown').checked,
+        autoSend: $('#optAutoSend').checked,
       };
+      const autoSendMsg = [
+        '取り込みと同時に、全項目に問題のない企業へ自動送信します。',
+        '問題のある企業は送信されず、「③ 送信」の保留に理由付きで並びます。',
+        'よろしいですか？',
+      ].join('\n');
+      if (opts.autoSend && !confirm(autoSendMsg)) return;
       const btn = $('#importBtn'); btn.disabled = true;
+      $('#importMsg').textContent = 'リストを保存しています…';
       try{
         const r = await api('/api/import','POST',opts);
         if(!r.started){ toast(r.message || '取り込む企業がありません'); btn.disabled=false; return; }
-        $('#importMsg').textContent = `${r.started} 社の取り込みを開始しました`;
+        intakeJobId = r.jobId ?? null;
+        $('#importMsg').textContent = `${r.started.toLocaleString('ja-JP')} 社を保存しました — 取り込みを開始します`;
         $('#importProgress').style.display = 'block';
         pollIntake();
+        if(r.autoSend){ toast('取り込みと並走する自動送信を開始しました'); pollBulk(); }
       }catch(e){ toast('エラー: '+String(e.message).slice(0,90)); btn.disabled=false; }
+    }
+
+    async function stopImport(){
+      try{
+        const r = await api('/api/import/stop','POST');
+        toast(r.message || '中断します');
+      }catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
+    }
+
+    async function resumeImport(){
+      try{
+        const r = await api('/api/import/resume','POST', intakeJobId?{ jobId:intakeJobId }:{});
+        intakeJobId = r.jobId ?? intakeJobId;
+        toast('続きから再開しました');
+        $('#importProgress').style.display = 'block';
+        pollIntake();
+      }catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
 
     function stat(n, label, cls){ return `<div class="stat ${cls||''}"><div class="n">${n}</div><div class="l">${label}</div></div>`; }
 
+    // 直近ジョブの ID。中断・再開・明細取得に使う。
+    let intakeJobId = null;
+    const num = (n) => (n||0).toLocaleString('ja-JP');
+
     function renderIntake(s){
       const btn = $('#importBtn');
+      intakeJobId = s.jobId ?? intakeJobId;
       const PHASE = { ingest:'取り込み中', resolve:'HP探索＋取り込み中', pipeline:'フォーム発見＋プラン作成中', done:'完了' };
-      $('#progressLabel').innerHTML = `<b>${PHASE[s.phase]||s.phase}</b>`
+      const paused = s.status === 'paused';
+      const head = paused ? '中断中' : (PHASE[s.phase]||s.phase);
+      $('#progressLabel').innerHTML = `<b>${esc(head)}</b>`
         + (s.current ? ` — ${esc(s.current)}` : (s.message ? ` — ${esc(s.message)}` : ''));
 
-      // progress bar: pipeline phase has a real denominator; ingest is indeterminate.
+      // Both phases now have a real denominator: L0 は読み込んだ行数 / 総行数、
+      // パイプラインは処理済み社数 / 対象社数。
       const fill = $('#pbarFill');
-      if(s.pipeline && s.total){ fill.style.width = Math.round((s.done/s.total)*100)+'%'; }
-      else { fill.style.width = s.running ? '40%' : '100%'; }
+      const inPipeline = s.phase === 'pipeline';
+      const [cur, tot] = inPipeline ? [s.done, s.pipelineTotal] : [s.ingestDone, s.total];
+      fill.style.width = tot ? Math.min(100, Math.round((cur/tot)*100))+'%' : (s.running?'40%':'100%');
 
       const stats = [
-        stat(s.ingested, '取り込み', 'ok'),
-        s.resolved ? stat(s.resolved, 'HP自動特定', 'ok') : '',
-        s.suppressed ? stat(s.suppressed, '競合等で除外', 'warn') : '',
-        s.requeued ? stat(s.requeued, '再取り込み', 'ok') : '',
-        s.skipped ? stat(s.skipped, 'スキップ') : '',
-        s.pipeline ? stat(`${s.done}/${s.total}`, '発見処理') : '',
-        s.pipeline ? stat(s.pendingApproval, '承認待ちへ', 'ok') : '',
-        s.pipeline && s.notFound ? stat(s.notFound, 'フォーム未発見', 'warn') : '',
-        s.pipeline && s.excluded ? stat(s.excluded, '自動除外', 'warn') : '',
-        s.pipeline && s.failed ? stat(s.failed, '解析失敗', 'bad') : '',
+        stat(`${num(s.ingestDone)}/${num(s.total)}`, '読み込み', 'ok'),
+        stat(num(s.ingested), '取り込み', 'ok'),
+        s.alreadyKnown ? stat(num(s.alreadyKnown), '取り込み済み（スキップ）') : '',
+        s.resolved ? stat(num(s.resolved), 'HP自動特定', 'ok') : '',
+        s.resolvedFromCache ? stat(num(s.resolvedFromCache), 'HP再利用', 'ok') : '',
+        s.suppressed ? stat(num(s.suppressed), '競合等で除外', 'warn') : '',
+        s.requeued ? stat(num(s.requeued), '再取り込み', 'ok') : '',
+        s.skipped ? stat(num(s.skipped), 'スキップ') : '',
+        s.pipeline ? stat(`${num(s.done)}/${num(s.pipelineTotal)}`, '発見処理') : '',
+        s.pipeline ? stat(num(s.pendingApproval), '承認待ちへ', 'ok') : '',
+        s.pipeline && s.notFound ? stat(num(s.notFound), 'フォーム未発見', 'warn') : '',
+        s.pipeline && s.excluded ? stat(num(s.excluded), '自動除外', 'warn') : '',
+        s.pipeline && s.failed ? stat(num(s.failed), '解析失敗', 'bad') : '',
+        s.errors ? stat(num(s.errors), 'エラー', 'bad') : '',
       ].filter(Boolean).join('');
       $('#intakeStats').innerHTML = stats;
 
       if(s.logs && s.logs.length){
         $('#intakeLogWrap').style.display = 'block';
-        $('#intakeLog').innerHTML = s.logs.slice(-200).map(l=>
+        $('#intakeLog').innerHTML = s.logs.map(l=>
           `<div>${esc(l.company)} — ${esc(l.status)}${l.detail?(' <span style="color:var(--danger)">'+esc(l.detail)+'</span>'):''}</div>`
         ).join('');
       }
@@ -659,45 +872,71 @@
         extra += `<div class="section-title" style="margin-top:14px;color:var(--danger)">⚠ ドメイン重複（列の対応が誤っている可能性）</div>`
           + `<div class="logbox">${s.collisions.map(c=>`<div>${esc(c.domain)} — ${c.names.map(esc).join(' / ')}</div>`).join('')}</div>`;
       }
-      if(s.unresolved && s.unresolved.length){
-        extra += `<div class="section-title" style="margin-top:14px">HP未特定（${s.unresolved.length} 社・手動でドメイン指定が必要）</div>`
-          + `<div class="logbox">${s.unresolved.map(u=>`<div>${esc(u.name)} — ${esc(u.reason)}${u.candidate?(' 候補: '+esc(u.candidate)):''}</div>`).join('')}</div>`;
-      }
-      if(s.noDomain && s.noDomain.length){
-        extra += `<div class="section-title" style="margin-top:14px">ドメイン無しでスキップ（${s.noDomain.length} 社・「HP自動探索」をオンにすると取り込めます）</div>`
-          + `<div class="logbox">${s.noDomain.map(n=>`<div>${esc(n)}</div>`).join('')}</div>`;
-      }
+      // 明細（HP未特定・スキップ）は件数だけを出し、実体は別APIから先頭200件のみ。
+      if(s.unresolved) extra += detailBlock('unresolved', s.unresolved, 'HP未特定', '手動でドメイン指定が必要です');
+      if(s.skipped) extra += detailBlock('nodomain', s.skipped - s.unresolved, 'ドメイン無しでスキップ', '「HP自動探索」をオンにすると取り込めます');
       $('#unresolvedWrap').innerHTML = extra;
 
+      // 中断／再開ボタンの出し分け。
+      $('#stopBtn').style.display = s.running ? '' : 'none';
+      $('#resumeBtn').style.display = (!s.running && paused) ? '' : 'none';
+      btn.disabled = !!s.running;
+
       if(!s.running){
-        btn.disabled = false;
         $('#importMsg').textContent = s.error
           ? `失敗：${s.error}`
-          : `完了：取り込み ${s.ingested} 社`
-            + (s.pipeline ? ` / 承認待ち ${s.pendingApproval} 社` : '');
-        $('#pendingPill').textContent = (parseInt($('#pendingPill').textContent)||0);
+          : paused
+            ? `中断中：${num(s.ingestDone)}/${num(s.total)} 行まで保存済み — 「続きから再開」で続行できます`
+            : `完了：取り込み ${num(s.ingested)} 社`
+              + (s.alreadyKnown ? ` / 取り込み済み ${num(s.alreadyKnown)} 社をスキップ` : '')
+              + (s.pipeline ? ` / 承認待ち ${num(s.pendingApproval)} 社` : '');
         loadCompanies();
       }
-      return s.running;
+      return !!s.running;
     }
+
+    function detailBlock(state, count, title, hint){
+      if(!count || count<=0) return '';
+      return `<div class="section-title" style="margin-top:14px">${title}（${num(count)} 社・${hint}）`
+        + ` <button data-detail="${state}" style="margin-left:8px">一覧を表示</button></div>`
+        + `<div class="logbox" id="detail-${state}" style="display:none"></div>`;
+    }
+
+    // 明細はクリック時に先頭200件だけ取得する（3万件を毎回返すと画面が固まる）。
+    $('#unresolvedWrap').addEventListener('click', async (e)=>{
+      const b = e.target.closest('[data-detail]');
+      if(!b || !intakeJobId) return;
+      const state = b.dataset.detail;
+      const box = $('#detail-'+state);
+      if(box.style.display !== 'none'){ box.style.display='none'; b.textContent='一覧を表示'; return; }
+      try{
+        const r = await api(`/api/import/rows?jobId=${intakeJobId}&state=${state}&limit=200`);
+        box.innerHTML = r.rows.map(x=>`<div>${esc(x.name)}${x.detail?(' — '+esc(x.detail)):''}</div>`).join('')
+          + (r.total > r.rows.length ? `<div style="color:var(--muted)">… ほか ${num(r.total - r.rows.length)} 社</div>` : '');
+        box.style.display=''; b.textContent='一覧を隠す';
+      }catch(err){ toast('明細を取得できません'); }
+    });
 
     async function pollIntake(){
       if(intakeTimer){ clearInterval(intakeTimer); intakeTimer=null; }
       const tick = async ()=>{
         let s; try{ s = await api('/api/import/status'); }catch{ return false; }
-        if(!s || (!s.running && !s.phase)){ return false; }
+        if(!s || s.status === 'none'){ return false; }
         const running = renderIntake(s);
         if(!running){
           if(intakeTimer){ clearInterval(intakeTimer); intakeTimer=null; }
           await load();
           toast(s.error
             ? `取り込み失敗：${String(s.error).slice(0,90)}`
-            : `取り込み完了：${s.ingested} 社` + (s.pipeline?` / 承認待ち ${s.pendingApproval} 社`:''));
+            : s.status === 'paused'
+              ? '取り込みを中断しました（続きから再開できます）'
+              : `取り込み完了：${num(s.ingested)} 社` + (s.pipeline?` / 承認待ち ${num(s.pendingApproval)} 社`:''));
         }
         return running;
       };
       const running = await tick();
-      if(running) intakeTimer = setInterval(tick, 2000);
+      // 大量リストでは 2 秒ポーリングは無駄なので間隔を広げる。
+      if(running) intakeTimer = setInterval(tick, 3000);
     }
 
     // ---- 取り込み済み企業テーブル ----
@@ -713,10 +952,20 @@
       const color = ST_COLOR[c.status] || '--muted';
       return `<span class="st-tag" style="color:var(${color});background:var(--code)">${esc(c.statusJa||c.status)}</span>`;
     }
+    // 一覧はサーバ側でページング＋絞り込みする。3万社を毎回まるごと受け取ると
+    // タブを開いた瞬間にブラウザが固まる。
+    const OV_PAGE = 200;
+    let ovOffset = 0, ovTotal = 0, ovGrand = 0;
+
     function renderCompanies(){
-      const q = ($('#ovFilter').value||'').toLowerCase().trim();
-      const rows = allCompanies.filter(c=> !q || (c.name||'').toLowerCase().includes(q) || (c.domain||'').toLowerCase().includes(q));
-      $('#ovCount').textContent = `${rows.length} / ${allCompanies.length} 社`;
+      const rows = allCompanies;
+      const from = ovTotal ? ovOffset+1 : 0;
+      const to = Math.min(ovOffset+rows.length, ovTotal);
+      $('#ovCount').textContent = `${from.toLocaleString('ja-JP')}–${to.toLocaleString('ja-JP')} / `
+        + `${ovTotal.toLocaleString('ja-JP')} 社`
+        + (ovTotal!==ovGrand ? `（全 ${ovGrand.toLocaleString('ja-JP')} 社）` : '');
+      $('#ovPrev').disabled = ovOffset <= 0;
+      $('#ovNext').disabled = ovOffset + OV_PAGE >= ovTotal;
       $('#companiesBody').innerHTML = rows.length ? rows.map(c=>`<tr>
         <td>${c.id}</td>
         <td>${esc(c.name)}</td>
@@ -727,16 +976,31 @@
       </tr>`).join('') : '<tr><td colspan="6" class="empty">まだ取り込まれていません</td></tr>';
     }
     async function loadCompanies(){
-      try{ allCompanies = await api('/api/companies'); renderCompanies(); }catch{}
+      const q = encodeURIComponent(($('#ovFilter').value||'').trim());
+      try{
+        const r = await api(`/api/companies?q=${q}&limit=${OV_PAGE}&offset=${ovOffset}`);
+        allCompanies = r.items || [];
+        ovTotal = r.total || 0; ovGrand = r.grandTotal || 0;
+        renderCompanies();
+      }catch{}
     }
-    $('#ovFilter').addEventListener('input', renderCompanies);
+    let ovTimer = null;
+    $('#ovFilter').addEventListener('input', ()=>{
+      clearTimeout(ovTimer);
+      ovTimer = setTimeout(()=>{ ovOffset = 0; loadCompanies(); }, 300);
+    });
+    $('#ovPrev').addEventListener('click', ()=>{ ovOffset = Math.max(0, ovOffset-OV_PAGE); loadCompanies(); });
+    $('#ovNext').addEventListener('click', ()=>{ ovOffset += OV_PAGE; loadCompanies(); });
 
     // ---- misc wiring ----
     function zoom(src) { $('#lbimg').src = src; $('#lightbox').showModal(); }
     $('#lightbox').addEventListener('click', () => $('#lightbox').close());
     $('#refresh').addEventListener('click', () => { load(); loadCompanies(); });
     $('#sendAll').addEventListener('click', sendAll);
+    $('#stopSend').addEventListener('click', stopSend);
     $('#importBtn').addEventListener('click', startImport);
+    $('#stopBtn').addEventListener('click', stopImport);
+    $('#resumeBtn').addEventListener('click', resumeImport);
     $('#sweep').addEventListener('click', async()=>{
       try{ const r=await api('/api/sweep','POST'); toast(`非適格 ${r.excluded} 件を除外しました`); await load(); }
       catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
@@ -746,8 +1010,17 @@
     load();
     loadCompanies();
     // Resume in-flight jobs on reload.
-    api('/api/execute-all/status').then((s)=>{ if(s && s.running){ switchTab('send'); pollBulk(); } }).catch(()=>{});
-    api('/api/import/status').then((s)=>{ if(s && s.running){ $('#importProgress').style.display='block'; pollIntake(); } }).catch(()=>{});
+    api('/api/execute-all/status').then((s)=>{ if(s && s.running){ switchTab('send'); pollBulk(); } else if(s && s.startedAt){ renderBulk(s); } }).catch(()=>{});
+    // 実行中でも「中断中」でも、前回の取り込み状況を復元して表示する
+    // （ブラウザを閉じても・サーバを再起動しても進捗は保存されている）。
+    api('/api/import/status').then((s)=>{
+      if(!s || s.status === 'none') return;
+      intakeJobId = s.jobId ?? null;
+      if(s.running || s.status === 'paused'){
+        $('#importProgress').style.display='block';
+        if(s.running) pollIntake(); else renderIntake(s);
+      }
+    }).catch(()=>{});
     setInterval(() => { if (!hasActiveEdit()) load(); }, 15000);
   </script>
 </body>
