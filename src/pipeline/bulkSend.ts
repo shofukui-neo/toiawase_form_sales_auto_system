@@ -5,6 +5,7 @@ import { runExecute } from './pipeline.js';
 import { approve } from './approval.js';
 import { assessSendReadiness, SENDABLE_STATUSES, type SendReadiness } from './readiness.js';
 import { intakeStatus } from './intake.js';
+import { sleepInterruptible } from '../utils/sleep.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('bulk');
@@ -109,13 +110,8 @@ function emptyState(opts: Required<Pick<BulkSendOptions, 'follow' | 'actor'>> & 
 }
 
 /** 中断要求に即座に反応できる待機。 */
-async function sleep(ms: number, s: BulkState): Promise<void> {
-  const step = 500;
-  for (let waited = 0; waited < ms; waited += step) {
-    if (s.stopRequested) return;
-    await new Promise((r) => setTimeout(r, Math.min(step, ms - waited)));
-  }
-}
+const sleep = (ms: number, s: BulkState): Promise<void> =>
+  sleepInterruptible(ms, () => s.stopRequested);
 
 function pushResult(s: BulkState, r: Omit<BulkResult, 'at'>): void {
   s.results.push({ ...r, at: new Date().toISOString() });

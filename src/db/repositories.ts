@@ -405,7 +405,15 @@ export const importJobs = {
       status?: ImportJobRow['status'];
       phase?: ImportJobRow['phase'];
       counters?: object;
+      /** 再開時にオプションを変更した場合（例: 自動送信の ON/OFF）に上書きする。 */
+      options?: object;
       error?: string | null;
+      /**
+       * 記録済みのエラーを消す。`error: null` は COALESCE で「触らない」の意味に
+       * なるため、再開時に前回の失敗理由を消すにはこちらを使う（そうしないと
+       * ダッシュボードに古い失敗が残り続ける）。
+       */
+      clearError?: boolean;
       finished?: boolean;
     },
   ): void {
@@ -414,7 +422,8 @@ export const importJobs = {
          status        = COALESCE(@status, status),
          phase         = COALESCE(@phase, phase),
          counters_json = COALESCE(@counters, counters_json),
-         error         = COALESCE(@error, error),
+         options_json  = COALESCE(@options, options_json),
+         error         = CASE WHEN @clearError = 1 THEN NULL ELSE COALESCE(@error, error) END,
          finished_at   = CASE WHEN @finished = 1 THEN datetime('now') ELSE finished_at END,
          updated_at    = datetime('now')
        WHERE id = @id`,
@@ -423,7 +432,9 @@ export const importJobs = {
       status: patch.status ?? null,
       phase: patch.phase ?? null,
       counters: patch.counters ? JSON.stringify(patch.counters) : null,
+      options: patch.options ? JSON.stringify(patch.options) : null,
       error: patch.error ?? null,
+      clearError: patch.clearError ? 1 : 0,
       finished: patch.finished ? 1 : 0,
     });
   },

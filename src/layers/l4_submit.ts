@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import type { Page } from 'playwright';
 import type { CompanyRow, FormSchema, RenderedContent, FieldRole, DetectedField } from '../types.js';
 import { config } from '../config.js';
-import { BrowserSession } from '../browser/browser.js';
+import { BrowserSession, withBrowserSlot } from '../browser/browser.js';
 import { extractButtons } from '../browser/extract.js';
 import { judgeResult, type Judgment } from './l5_result.js';
 import { shouldFillField, resolveFieldValue } from './fillPolicy.js';
@@ -318,6 +318,15 @@ export async function planSubmission(
   schema: FormSchema,
   content: RenderedContent,
 ): Promise<PlanResult> {
+  // プランは取り込み側の処理。送信 (Execute) に枠を譲る通常優先度で待つ。
+  return withBrowserSlot(() => planSubmissionInSlot(company, schema, content));
+}
+
+async function planSubmissionInSlot(
+  company: CompanyRow,
+  schema: FormSchema,
+  content: RenderedContent,
+): Promise<PlanResult> {
   mkdirSync(config.artifactsDir, { recursive: true });
   const session = new BrowserSession({ seed: company.id + 1 });
   try {
@@ -368,6 +377,18 @@ export interface ExecuteResult {
  * confirm -> final submit (or direct submit on 1-step forms) and judges (L5).
  */
 export async function executeSubmission(
+  company: CompanyRow,
+  schema: FormSchema,
+  content: RenderedContent,
+): Promise<ExecuteResult> {
+  // 送信は優先枠。送信可能時間帯 (§9) と日次上限の中でしか動けないので、
+  // 何時間走ってもよい取り込み側の発見処理の後ろに並ばせない。
+  return withBrowserSlot(() => executeSubmissionInSlot(company, schema, content), {
+    priority: true,
+  });
+}
+
+async function executeSubmissionInSlot(
   company: CompanyRow,
   schema: FormSchema,
   content: RenderedContent,

@@ -11,12 +11,13 @@ import {
 import { ingestOne, resolveHomepageCached, type IngestRow } from '../layers/l0_list.js';
 import { normalizeDomain } from '../utils/url.js';
 import { discoverAndParse, buildPlan } from './pipeline.js';
+import { sleepInterruptible } from '../utils/sleep.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('intake');
 
 /**
- * リスト取り込み (L0) — 再開可能なジョブ。
+ * リスト取り込み (L0) — 再開可能な**ストリーミング**ジョブ。
  *
  * 3万件規模のリストを 1 リクエストで処理すると、終わる前にブラウザ／接続が切れ、
  * 途中まで進んだ結果がどこにも残らない。ここでは
@@ -27,6 +28,16 @@ const log = logger('intake');
  *
  * ため、接続が切れてもサーバが落ちても「続きから」再開できる。すでに読み込んだ
  * 企業 (companies に存在するドメイン) は再処理しない。
+ *
+ * さらに L0 取り込みと L1〜L4 パイプラインは **並走する**。`import_rows.state` が
+ * そのままキュー:
+ *
+ *   pending ──[ingestLoop]──▶ ingested ──[pipelineLoop]──▶ done
+ *
+ * 二つのループが別々の state を消費するので、3万行を読み終えるのを待たずに、
+ * 取り込めた企業から順に発見 → 解析 → プラン → （一斉送信が走っていれば）送信
+ * まで流れていく。better-sqlite3 は同期・Node はシングルスレッドなので、両ループ
+ * が同じテーブルを触っても await 境界でしか切り替わらず競合しない。
  */
 
 export interface IntakeOptions {
@@ -39,6 +50,13 @@ export interface IntakeOptions {
   skipKnown: boolean;
   /** パイプライン処理の並列数。既定は config.intake.concurrency。 */
   concurrency?: number;
+  /**
+   * 取り込みと並走して、準備できた（全項目クリアの）企業から自動送信する。
+   * ジョブに保存されるので、中断→再開やサーバ再起動をまたいでも復活する。
+   */
+  autoSend?: boolean;
+  /** autoSend の監査に残す実行者名。 */
+  autoSendActor?: string;
 }
 
 export interface IntakeCounters {
@@ -72,14 +90,26 @@ export interface IntakeSnapshot extends IntakeCounters {
   jobId: number | null;
   running: boolean;
   status: ImportJobRow['status'] | 'none';
+  /**
+   * L0 側の状態。パイプラインは並走するので、`phase` は「今どちらか一方」を
+   * 表さない — パイプラインが動いているかは {@link pipelineRunning} を見る。
+   */
   phase: ImportJobRow['phase'];
+  /** L0 取り込みループが走っているか。 */
+  ingestRunning: boolean;
+  /** L1〜L4 パイプラインループが走っているか。 */
+  pipelineRunning: boolean;
   message: string;
+  /** パイプラインループ側の現況メッセージ（並走中は message と別に出す）。 */
+  pipelineMessage: string;
   pipeline: boolean;
   /** リストの総行数。 */
   total: number;
   /** L0 で処理し終えた行数（進捗バーの分子）。 */
   ingestDone: number;
   current: string | null;
+  /** パイプラインが今処理している企業。 */
+  pipelineCurrent: string | null;
   /** 直近のログのみ（全件は /api/import/rows で取得）。 */
   logs: IntakeLog[];
   collisions: { domain: string; names: string[] }[];
@@ -125,7 +155,22 @@ interface RunState {
   /** Computed once the list has been fully read; static from then on. */
   collisions: { domain: string; names: string[] }[] | null;
   promise: Promise<void> | null;
+  /* --- 並走する2ループの状態 --- */
+  ingestRunning: boolean;
+  pipelineRunning: boolean;
+  /**
+   * L0 が全行を読み終えた（＝これ以上 `ingested` は増えない）。pipelineLoop が
+   * 「候補ゼロ」を *完了* と解釈してよいかの唯一の判断材料。
+   */
+  ingestFinished: boolean;
+  pipelineCurrent: string | null;
+  pipelineMessage: string;
+  /** ループごとの致命エラー。片方だけ死んでも他方は走り切らせる。 */
+  loopErrors: { ingest: string | null; pipeline: string | null };
 }
+
+/** パイプラインが候補待ちで空回りする間隔。 */
+const PIPELINE_IDLE_WAIT_MS = 1000;
 
 let run: RunState | null = null;
 
@@ -184,8 +229,13 @@ export function startIntake(rows: IngestRow[], opts: IntakeOptions): StartResult
   return { jobId, total: rows.length };
 }
 
-/** Resume a saved job (after a disconnect, a restart, or a manual 中断). */
-export function resumeIntake(jobId?: number): StartResult {
+/**
+ * Resume a saved job (after a disconnect, a restart, or a manual 中断).
+ *
+ * `override` で保存済みオプションの一部を差し替えられる（例: 再開のついでに
+ * 自動送信を ON にする）。差し替えた内容はジョブに書き戻すので、次の再開でも効く。
+ */
+export function resumeIntake(jobId?: number, override?: Partial<IntakeOptions>): StartResult {
   if (run && !run.stopRequested && run.promise) {
     throw new Error('取り込みはすでに実行中です');
   }
@@ -193,10 +243,15 @@ export function resumeIntake(jobId?: number): StartResult {
   if (!job) throw new Error('再開できる取り込みジョブがありません');
   if (job.status === 'done') throw new Error(`ジョブ #${job.id} は完了済みです`);
 
-  const opts = { ...defaultOptions(), ...(JSON.parse(job.options_json || '{}') as Partial<IntakeOptions>) };
-  log.info(`ジョブ #${job.id} を再開します`);
+  const opts: IntakeOptions = {
+    ...defaultOptions(),
+    ...(JSON.parse(job.options_json || '{}') as Partial<IntakeOptions>),
+    ...(override ?? {}),
+  };
+  if (override && Object.keys(override).length) importJobs.save(job.id, { options: opts });
+  log.info(`ジョブ #${job.id} を再開します (autoSend=${!!opts.autoSend})`);
   audit.log({ layer: 'L0', action: 'intake_resume', detail: `job=${job.id}` });
-  launch(job.id, opts as IntakeOptions, job.total, job);
+  launch(job.id, opts, job.total, job);
   return { jobId: job.id, total: job.total };
 }
 
@@ -207,7 +262,26 @@ export function defaultOptions(): IntakeOptions {
     pipeline: true,
     skipKnown: true,
     concurrency: config.intake.concurrency,
+    autoSend: false,
   };
+}
+
+/**
+ * 随時送信の起動。`autoSend` はジョブの options に保存されているので、新規開始
+ * だけでなく「続きから再開」やサーバ再起動後の自動再開でもここを通る。
+ *
+ * bulkSend は intake を参照している（`intakeStillProducing()`）ため、静的 import
+ * にすると循環参照になる。実行時にしか要らないので動的 import で切る。
+ */
+function maybeStartAutoSend(opts: IntakeOptions): void {
+  if (!opts.autoSend || !opts.pipeline) return;
+  void import('./bulkSend.js')
+    .then(({ startBulkSend, isBulkRunning }) => {
+      if (isBulkRunning()) return;
+      const r = startBulkSend({ follow: true, actor: opts.autoSendActor ?? 'auto:all-clean' });
+      if (r.started) log.info('取り込みと並走する自動送信を開始しました');
+    })
+    .catch((e) => log.error(`自動送信の開始に失敗: ${(e as Error).message}`));
 }
 
 /** Ask the running job to stop at the next checkpoint (progress is kept). */
@@ -265,9 +339,17 @@ function launch(jobId: number, opts: IntakeOptions, total: number, job?: ImportJ
     finished: false,
     collisions: null,
     promise: null,
+    ingestRunning: false,
+    pipelineRunning: false,
+    ingestFinished: false,
+    pipelineCurrent: null,
+    pipelineMessage: '',
+    loopErrors: { ingest: null, pipeline: null },
   };
   run = state;
-  importJobs.save(jobId, { status: 'running' });
+  // 前回の失敗理由をここで消す。残したままだと再開しても赤いエラー表示が消えない。
+  importJobs.save(jobId, { status: 'running', clearError: true });
+  maybeStartAutoSend(opts);
   state.promise = worker(state).catch((e) => {
     const msg = (e as Error).message;
     log.error(`intake job #${jobId} failed: ${msg}`);
@@ -277,10 +359,52 @@ function launch(jobId: number, opts: IntakeOptions, total: number, job?: ImportJ
   });
 }
 
+/**
+ * ループ単位の致命エラー。並走後は「HP探索が死んだせいで発見処理も送信も止まる」
+ * のが一番痛い事故なので、片方の例外で他方を巻き込まない。
+ */
+function recordLoopError(state: RunState, loop: 'ingest' | 'pipeline', e: unknown): void {
+  const msg = (e as Error).message;
+  state.loopErrors[loop] = msg;
+  state.counters.errors++;
+  log.error(`ジョブ #${state.jobId} の ${loop} ループが停止: ${msg}`);
+  audit.log({ layer: 'L0', action: `intake_${loop}_failed`, detail: `job=${state.jobId} ${msg}` });
+  if (loop === 'ingest') {
+    // 供給側が死んだ = これ以上 ingested は増えない。パイプラインは残りを
+    // 処理し切ってから正常終了できる（ここを立てないと永久に待ち続ける）。
+    state.ingestFinished = true;
+  }
+}
+
 async function worker(state: RunState): Promise<void> {
   try {
-    await ingestPhase(state);
-    if (!state.stopRequested && state.opts.pipeline) await pipelinePhase(state);
+    // L0 取り込みと L1〜L4 パイプラインを並走させる。pipelineLoop は
+    // ingestLoop が供給する `ingested` 行を、増えるそばから消費していく。
+    const ingest = ingestLoop(state)
+      .catch((e) => recordLoopError(state, 'ingest', e))
+      .finally(() => { state.ingestRunning = false; });
+    const pipeline = state.opts.pipeline
+      ? pipelineLoop(state)
+          .catch((e) => recordLoopError(state, 'pipeline', e))
+          .finally(() => { state.pipelineRunning = false; })
+      : Promise.resolve();
+    await Promise.all([ingest, pipeline]);
+
+    const failure = state.loopErrors.ingest ?? state.loopErrors.pipeline;
+    if (failure) {
+      // 片方だけ死んだ場合も paused 相当で残す — 「再開」で続きから拾える。
+      const both = state.loopErrors.ingest && state.loopErrors.pipeline;
+      state.message = both ? `失敗: ${failure}` : `一部失敗: ${failure}（「再開」で続きから処理します）`;
+      importJobs.save(state.jobId, {
+        status: both ? 'failed' : 'paused',
+        phase: state.phase,
+        counters: state.counters,
+        error: failure,
+        finished: !!both,
+      });
+      state.finished = !!both;
+      return;
+    }
 
     if (state.stopRequested) {
       state.message = '中断しました（「再開」で続きから処理します）';
@@ -309,12 +433,13 @@ function checkpoint(state: RunState): void {
   importJobs.save(state.jobId, { phase: state.phase, counters: state.counters });
 }
 
-/* ------------------------------ phase: ingest ----------------------------- */
+/* ------------------------------- loop: ingest ----------------------------- */
 
-async function ingestPhase(state: RunState): Promise<void> {
+async function ingestLoop(state: RunState): Promise<void> {
   const { opts } = state;
   const icp = loadIcp();
   const chunkSize = config.intake.chunkSize;
+  state.ingestRunning = true;
   state.phase = opts.resolve ? 'resolve' : 'ingest';
 
   // Rows already processed by an earlier (interrupted) run.
@@ -419,18 +544,35 @@ async function ingestPhase(state: RunState): Promise<void> {
   }
 
   state.current = null;
-  state.message = state.opts.pipeline ? 'フォームを発見して確認プランを作成中…' : '取り込み完了';
+  state.message = `取り込み完了 — ${state.ingestDone.toLocaleString('ja-JP')} 行を読み終えました`;
   // The whole list has been read, so the mis-mapped-column check is final now.
   // Computing it here (once) keeps it off the 3s status poll.
   state.collisions = importRows.collisions(state.jobId, 20);
+  // これ以上 `ingested` は増えない。pipelineLoop が「候補ゼロ = 完了」と
+  // 判断してよくなる唯一のタイミング。
+  state.ingestFinished = true;
+  // 残りはパイプラインだけ。中断した場合の再開表示がここを読む。
+  if (state.opts.pipeline) state.phase = 'pipeline';
+  checkpoint(state);
 }
 
-/* ----------------------------- phase: pipeline ---------------------------- */
+/* ---------------------------- loop: pipeline ------------------------------ */
 
-async function pipelinePhase(state: RunState): Promise<void> {
-  state.phase = 'pipeline';
-  const counts = importRows.countsByState(state.jobId);
-  state.counters.pipelineTotal = (counts.ingested ?? 0) + state.counters.done;
+/**
+ * 分母を取り直す。並走中は ingestLoop が `ingested` を増やし続けるので、
+ * 開始時に一度確定させると「1,240/1,240 のまま増えない」表示になる。
+ */
+function refreshPipelineTotal(state: RunState): void {
+  const c = importRows.countsByState(state.jobId);
+  state.counters.pipelineTotal = (c.ingested ?? 0) + (c.done ?? 0) + (c.error ?? 0);
+}
+
+async function pipelineLoop(state: RunState): Promise<void> {
+  state.pipelineRunning = true;
+  // `phase` は L0 側の状態を表す共有フィールド。ここで 'pipeline' を書くと
+  // 並走している ingestLoop の 'resolve'/'ingest' を踏み潰してしまう。
+  // L0 が読み終わったときに ingestLoop 自身が 'pipeline' へ進める。
+  refreshPipelineTotal(state);
   checkpoint(state);
 
   const concurrency = Math.max(1, state.opts.concurrency ?? config.intake.concurrency);
@@ -440,11 +582,22 @@ async function pipelinePhase(state: RunState): Promise<void> {
   for (;;) {
     if (state.stopRequested) return;
     const batch = importRows.nextBatch(state.jobId, 'ingested', chunkSize);
-    if (batch.length === 0) break;
+    if (batch.length === 0) {
+      // 候補ゼロ = 「まだ供給されていない」かもしれない。L0 が全行を読み終えた
+      // ときだけ本当に完了。
+      if (state.ingestFinished) break;
+      state.pipelineCurrent = null;
+      state.pipelineMessage = '取り込み待ち — 読み込めた企業から順に処理します';
+      lastSeq = -1; // 空振りを挟んだので spin 判定はリセットする
+      refreshPipelineTotal(state);
+      await sleepInterruptible(PIPELINE_IDLE_WAIT_MS, () => state.stopRequested);
+      continue;
+    }
     if (batch[0].seq === lastSeq) {
       throw new Error(`フォーム発見処理が進みません (job=${state.jobId} seq=${lastSeq})`);
     }
     lastSeq = batch[0].seq;
+    refreshPipelineTotal(state);
 
     await mapLimit(batch, concurrency, async (r) => {
       if (state.stopRequested) return;
@@ -463,7 +616,8 @@ async function pipelinePhase(state: RunState): Promise<void> {
     checkpoint(state);
     await yieldToLoop();
   }
-  state.current = null;
+  state.pipelineCurrent = null;
+  state.pipelineMessage = 'フォーム発見処理完了';
 }
 
 /** L1 discover → L2 parse → L4 plan for one already-ingested company. */
@@ -488,7 +642,8 @@ async function processOne(state: RunState, r: ImportRowRecord): Promise<void> {
     return;
   }
 
-  state.current = `#${c.id} ${c.name}`;
+  // 並走中は L0 側も `current` を書くので、パイプラインは別フィールドを使う。
+  state.pipelineCurrent = `#${c.id} ${c.name}`;
   let errorDetail: string | undefined;
   try {
     await discoverAndParse(c.id);
@@ -510,7 +665,7 @@ async function processOne(state: RunState, r: ImportRowRecord): Promise<void> {
     detail: errorDetail ?? st,
   });
   state.counters.done++;
-  state.message = `フォーム発見中… ${state.counters.done}/${state.counters.pipelineTotal} 社`;
+  state.pipelineMessage = `フォーム発見中… ${state.counters.done}/${state.counters.pipelineTotal} 社`;
 }
 
 /* -------------------------------- utilities ------------------------------- */
@@ -549,11 +704,15 @@ export function intakeStatus(): IntakeSnapshot {
       running,
       status: running ? 'running' : (job?.status ?? 'paused'),
       phase: run.phase,
+      ingestRunning: running && run.ingestRunning,
+      pipelineRunning: running && run.pipelineRunning,
       message: run.message,
+      pipelineMessage: run.pipelineMessage,
       pipeline: run.opts.pipeline,
       total: run.total,
       ingestDone: run.ingestDone,
       current: run.current,
+      pipelineCurrent: run.pipelineCurrent,
       logs: run.logs.slice(-MAX_LOGS),
       // Computed once, when the ingest phase ends — never on the poll path.
       collisions: run.collisions ?? [],
@@ -569,7 +728,9 @@ export function intakeStatus(): IntakeSnapshot {
   if (!job) {
     return {
       ...emptyCounters(), jobId: null, running: false, status: 'none', phase: 'done',
-      message: '', pipeline: false, total: 0, ingestDone: 0, current: null, logs: [],
+      ingestRunning: false, pipelineRunning: false,
+      message: '', pipelineMessage: '', pipeline: false, total: 0, ingestDone: 0,
+      current: null, pipelineCurrent: null, logs: [],
       collisions: [], error: null, startedAt: null, finishedAt: null,
     };
   }
@@ -582,16 +743,20 @@ export function intakeStatus(): IntakeSnapshot {
     running: false,
     status: job.status,
     phase: job.phase,
+    ingestRunning: false,
+    pipelineRunning: false,
     message:
       job.status === 'paused'
         ? '中断中（「再開」で続きから処理します）'
         : job.status === 'failed'
           ? `失敗: ${job.error ?? ''}`
           : '完了',
+    pipelineMessage: '',
     pipeline: opts.pipeline !== false,
     total: job.total,
     ingestDone: job.total - (counts.pending ?? 0),
     current: null,
+    pipelineCurrent: null,
     logs: [],
     collisions: importRows.collisions(job.id, 20),
     error: job.error,

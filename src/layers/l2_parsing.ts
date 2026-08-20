@@ -13,7 +13,7 @@ import {
   getVisibleText,
   primaryFormSelector,
 } from '../browser/extract.js';
-import { BrowserSession } from '../browser/browser.js';
+import { BrowserSession, withBrowserSlot } from '../browser/browser.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L2');
@@ -192,6 +192,13 @@ export interface ParseInput {
  * no-sales policy / honeypot), and computes the confidence gate (§5).
  */
 export async function parseForm(input: ParseInput): Promise<FormSchema> {
+  // 既存の page を渡された場合は呼び出し側がすでにブラウザ枠を持っている。
+  // ここで取り直すと自分の枠の解放を自分で待つデッドロックになる。
+  if (input.page) return parseFormInSlot(input);
+  return withBrowserSlot(() => parseFormInSlot(input));
+}
+
+async function parseFormInSlot(input: ParseInput): Promise<FormSchema> {
   const { formUrl, formConfidence } = input;
   let session: BrowserSession | null = null;
   let page = input.page;

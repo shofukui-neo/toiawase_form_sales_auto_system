@@ -99,6 +99,14 @@ export interface AppConfig {
   sendMinIntervalMs: number;
   sendMaxIntervalMs: number;
   headless: boolean;
+  /**
+   * 同時に起動してよい Chromium プロセスの上限（全レイヤ横断）。
+   *
+   * 取り込み（L1発見/L2解析）と一斉送信（L4）が並走するため、レイヤごとの
+   * 並列数を足すと実際の同時起動数になる。1プロセス 200-400MB 使うので、
+   * ここで頭を押さえないと 3万件の後半でメモリを踏み抜く。
+   */
+  browserConcurrency: number;
   /** リスト取り込み (L0) のバッチ／並列度チューニング。 */
   intake: {
     /** Rows committed per transaction + per progress checkpoint. */
@@ -146,6 +154,8 @@ export const config: AppConfig = {
   sendMinIntervalMs: envInt('SEND_MIN_INTERVAL_MS', 45000),
   sendMaxIntervalMs: envInt('SEND_MAX_INTERVAL_MS', 120000),
   headless: envBool('HEADLESS', true),
+  // 既定 4 = 発見処理 3 (INTAKE_CONCURRENCY) + 送信 1。並走の既定構成そのまま。
+  browserConcurrency: Math.max(1, envInt('BROWSER_MAX_CONCURRENCY', 4)),
   intake: {
     chunkSize: Math.max(1, envInt('INTAKE_CHUNK_SIZE', 500)),
     concurrency: Math.max(1, envInt('INTAKE_CONCURRENCY', 3)),

@@ -79,17 +79,15 @@ export function createServer() {
       acceptUnverified: req.body?.acceptUnverified === true,
       pipeline: req.body?.pipeline !== false, // default on
       skipKnown: req.body?.skipKnown !== false, // default on: 一度読んだ企業は再処理しない
+      // 随時送信: 取り込みと並走して、準備できた（全項目クリアの）企業から送る。
+      // オプションに載せるとジョブに保存され、中断→再開・サーバ再起動でも復活する。
+      autoSend: req.body?.autoSend === true,
+      autoSendActor: `auto:${approver()}`,
     };
     try {
       const { jobId, total } = startIntake(rows, opts);
-      log.info(`リスト取り込みを開始: job=#${jobId} ${total} 社 (resolve=${opts.resolve} pipeline=${opts.pipeline})`);
-      // 随時送信: 取り込みと並走して、準備できた（全項目クリアの）企業から送る。
-      let autoSend = false;
-      if (req.body?.autoSend === true && opts.pipeline) {
-        autoSend = startBulkSend({ follow: true, actor: `auto:${approver()}` }).started;
-        if (autoSend) log.info('取り込みと並走する自動送信を開始しました');
-      }
-      return res.json({ started: total, jobId, autoSend });
+      log.info(`リスト取り込みを開始: job=#${jobId} ${total} 社 (resolve=${opts.resolve} pipeline=${opts.pipeline} autoSend=${opts.autoSend})`);
+      return res.json({ started: total, jobId, autoSend: !!opts.autoSend && opts.pipeline });
     } catch (e) {
       return res.json({ started: 0, message: (e as Error).message, running: true });
     }
@@ -107,7 +105,12 @@ export function createServer() {
   app.post('/api/import/resume', (req, res) => {
     try {
       const jobId = req.body?.jobId ? Number(req.body.jobId) : undefined;
-      const r = resumeIntake(jobId);
+      // 再開のついでに自動送信を切り替えられる。未指定なら保存済みの設定のまま。
+      const override =
+        req.body?.autoSend === undefined
+          ? undefined
+          : { autoSend: req.body.autoSend === true, autoSendActor: `auto:${approver()}` };
+      const r = resumeIntake(jobId, override);
       res.json({ ok: true, ...r });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });

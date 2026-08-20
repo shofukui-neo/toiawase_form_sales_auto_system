@@ -15,6 +15,77 @@ function ensureStealth(): void {
   stealthRegistered = true;
 }
 
+/* ------------------------- ブラウザ枠（全レイヤ横断） ------------------------ */
+
+/**
+ * 同時に生きている Chromium プロセスの数を `config.browserConcurrency` で抑える。
+ *
+ * 取り込み（L1発見 / L2解析、既定 3 並列）と一斉送信（L4、1 並列）が**同時に**
+ * 走るようになったため、レイヤごとの並列数だけでは実際の同時起動数を制御できない。
+ * `BrowserSession` は毎回 `chromium.launch()` する（プロセスを共有しない）ので、
+ * 上限を設けないと 3万件の後半でメモリを踏み抜く。
+ */
+interface Waiter {
+  resolve: () => void;
+  priority: boolean;
+}
+
+let inFlight = 0;
+const waiters: Waiter[] = [];
+
+function acquireSlot(priority: boolean): Promise<void> {
+  if (inFlight < config.browserConcurrency) {
+    inFlight++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const w: Waiter = { resolve, priority };
+    if (!priority) {
+      waiters.push(w);
+      return;
+    }
+    // 優先枠は待ち行列の先頭へ。ただし先に待っている優先枠は追い越さない。
+    const i = waiters.findIndex((x) => !x.priority);
+    if (i < 0) waiters.push(w);
+    else waiters.splice(i, 0, w);
+  });
+}
+
+function releaseSlot(): void {
+  // 待ち行列があれば枠を直接引き継ぐ（inFlight は据え置き）。いったん減らして
+  // から起こすと、その隙に別の呼び出しが割り込んで待機側が飢える。
+  const next = waiters.shift();
+  if (next) next.resolve();
+  else inFlight--;
+}
+
+export interface BrowserSlotOptions {
+  /**
+   * 枠の空きを待つ列の先頭に入る。送信 (L4 Execute) 用。
+   * 取り込みは何時間走ってもよいが、送信は送信可能時間帯と日次上限の中でしか
+   * 動けないので、発見処理の後ろに並ばせてはいけない。
+   */
+  priority?: boolean;
+}
+
+/** ブラウザ枠を 1 つ確保して `fn` を実行する。空くまで待つ。 */
+export async function withBrowserSlot<T>(
+  fn: () => Promise<T>,
+  opts: BrowserSlotOptions = {},
+): Promise<T> {
+  await acquireSlot(opts.priority === true);
+  try {
+    return await fn();
+  } finally {
+    releaseSlot();
+  }
+}
+
+/** 診断用（ダッシュボード／ログ）。 */
+export function browserSlotStats(): { inFlight: number; waiting: number; max: number } {
+  return { inFlight, waiting: waiters.length, max: config.browserConcurrency };
+}
+
 /**
  * Deterministic PRNG so "human" jitter is reproducible per run (avoids the
  * Math.random ban and keeps Plan/Execute comparable). Seed varies per session.

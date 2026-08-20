@@ -287,15 +287,30 @@ program
   .description('リスト取り込みジョブの状況表示 / 中断したジョブの再開（3万件規模の分割処理）')
   .option('--resume', '未完了のジョブを続きから再開する', false)
   .option('--job <id>', '対象ジョブID（既定: 直近の未完了ジョブ）')
-  .action(async (o: { resume: boolean; job?: string }) => {
+  .option('--auto-send', '再開と同時に随時送信も走らせる（全項目クリアの企業のみ）', false)
+  .option('--no-auto-send', '保存されている随時送信の設定をオフにして再開する')
+  .action(async (o: { resume: boolean; job?: string; autoSend?: boolean }) => {
     const { intakeStatus, resumeIntake } = await import('./pipeline/intake.js');
     if (o.resume) {
-      const r = resumeIntake(o.job ? Number(o.job) : undefined);
+      // commander は --auto-send / --no-auto-send のどちらも指定されなければ
+      // 既定値 false を渡してくる。明示された時だけジョブの設定を上書きする。
+      const explicit = process.argv.some((a) => a === '--auto-send' || a === '--no-auto-send');
+      const r = resumeIntake(
+        o.job ? Number(o.job) : undefined,
+        explicit ? { autoSend: o.autoSend === true, autoSendActor: 'auto:cli' } : undefined,
+      );
       console.log(`ジョブ #${r.jobId} を再開しました（全 ${r.total} 行）`);
-      // Keep the process alive until the job settles.
+      // Keep the process alive until the job settles. 取り込みと発見処理は
+      // 並走するので、2つの進捗を並べて出す。
+      let last = '';
       for (;;) {
         const s = intakeStatus();
         if (!s.running) break;
+        const line =
+          `  読み込み ${s.ingestDone}/${s.total}` +
+          (s.pipeline ? ` | 発見処理 ${s.done}/${s.pipelineTotal}${s.ingestRunning ? '+' : ''}` : '') +
+          ` | 承認待ちへ ${s.pendingApproval}`;
+        if (line !== last) { console.log(line); last = line; }
         await sleep(2000);
       }
     }

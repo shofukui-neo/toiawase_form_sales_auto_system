@@ -147,6 +147,13 @@
     .progress { margin-top:12px; }
     .pbar { height:8px; border-radius:999px; background:var(--code); overflow:hidden; margin:8px 0; }
     .pbar > i { display:block; height:100%; background:var(--accent); width:0; transition:width .3s; }
+    /* 取り込みと発見処理は並走するので進捗は 2 本立て。 */
+    .track { margin:10px 0; }
+    .track-head { display:flex; justify-content:space-between; align-items:baseline; gap:10px;
+      font-size:12px; font-weight:700; }
+    .track-head .mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-weight:600; color:var(--muted); }
+    .track-note { margin:0; min-height:16px; font-size:11px; }
+    .track.idle .pbar > i { opacity:.45; }
     .statgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; margin:12px 0; }
     .stat { background:var(--code); border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
     .stat .n { font-size:20px; font-weight:800; } .stat .l { font-size:11px; color:var(--muted); }
@@ -236,8 +243,18 @@
         </div>
 
         <div class="progress" id="importProgress" style="display:none">
-          <div class="pbar"><i id="pbarFill"></i></div>
-          <div class="hint" id="progressLabel" style="margin:0"></div>
+          <div class="hint" id="progressLabel" style="margin:0 0 6px"></div>
+          <!-- L0 取り込みと L1〜L4 発見処理は並走するので、進捗バーは 2 本。 -->
+          <div class="track">
+            <div class="track-head"><span id="ingestName">① 読み込み</span><span id="ingestNum" class="mono"></span></div>
+            <div class="pbar"><i id="pbarFill"></i></div>
+            <div class="hint track-note" id="ingestNote"></div>
+          </div>
+          <div class="track" id="pipeTrack" style="display:none">
+            <div class="track-head"><span>② フォーム発見・プラン作成</span><span id="pipeNum" class="mono"></span></div>
+            <div class="pbar"><i id="pbarFillPipe"></i></div>
+            <div class="hint track-note" id="pipeNote"></div>
+          </div>
           <div class="statgrid" id="intakeStats"></div>
           <details id="intakeLogWrap" style="display:none"><summary class="toggle">処理ログを表示</summary>
             <div class="logbox" id="intakeLog"></div>
@@ -769,6 +786,13 @@
     $('#optResolve').addEventListener('change', ()=>{ $('#optUnverified').disabled = !$('#optResolve').checked; });
     $('#optUnverified').disabled = true;
 
+    // 取り込み開始と「続きから再開」の両方で使う確認文。
+    const autoSendMsg = [
+      '取り込みと同時に、全項目に問題のない企業へ自動送信します。',
+      '問題のある企業は送信されず、「③ 送信」の保留に理由付きで並びます。',
+      'よろしいですか？',
+    ].join('\n');
+
     async function startImport(){
       const text = currentText();
       if(!text){ toast('リストを入力してください'); return; }
@@ -780,11 +804,6 @@
         skipKnown: $('#optSkipKnown').checked,
         autoSend: $('#optAutoSend').checked,
       };
-      const autoSendMsg = [
-        '取り込みと同時に、全項目に問題のない企業へ自動送信します。',
-        '問題のある企業は送信されず、「③ 送信」の保留に理由付きで並びます。',
-        'よろしいですか？',
-      ].join('\n');
       if (opts.autoSend && !confirm(autoSendMsg)) return;
       const btn = $('#importBtn'); btn.disabled = true;
       $('#importMsg').textContent = 'リストを保存しています…';
@@ -807,12 +826,18 @@
     }
 
     async function resumeImport(){
+      // 再開時も画面のチェックボックスに従って随時送信を切り替える（ジョブに保存される）。
+      const autoSend = $('#optAutoSend').checked;
+      if (autoSend && !confirm(autoSendMsg)) return;
+      const body = { autoSend };
+      if (intakeJobId) body.jobId = intakeJobId;
       try{
-        const r = await api('/api/import/resume','POST', intakeJobId?{ jobId:intakeJobId }:{});
+        const r = await api('/api/import/resume','POST', body);
         intakeJobId = r.jobId ?? intakeJobId;
-        toast('続きから再開しました');
+        toast(autoSend ? '続きから再開しました（自動送信あり）' : '続きから再開しました');
         $('#importProgress').style.display = 'block';
         pollIntake();
+        if(autoSend) pollBulk();
       }catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     }
 
@@ -825,18 +850,40 @@
     function renderIntake(s){
       const btn = $('#importBtn');
       intakeJobId = s.jobId ?? intakeJobId;
-      const PHASE = { ingest:'取り込み中', resolve:'HP探索＋取り込み中', pipeline:'フォーム発見＋プラン作成中', done:'完了' };
       const paused = s.status === 'paused';
-      const head = paused ? '中断中' : (PHASE[s.phase]||s.phase);
+      // 2つのループが並走するので、見出しは「今どちらが動いているか」から組み立てる。
+      const active = [];
+      if(s.ingestRunning) active.push(s.phase==='resolve' ? 'HP探索＋読み込み' : '読み込み');
+      if(s.pipelineRunning) active.push('フォーム発見・プラン作成');
+      const head = paused ? '中断中'
+        : active.length ? active.join(' ＋ ') + ' を並行実行中'
+        : (s.running ? '処理中' : '完了');
       $('#progressLabel').innerHTML = `<b>${esc(head)}</b>`
-        + (s.current ? ` — ${esc(s.current)}` : (s.message ? ` — ${esc(s.message)}` : ''));
+        + (s.message ? ` — ${esc(s.message)}` : '');
 
-      // Both phases now have a real denominator: L0 は読み込んだ行数 / 総行数、
-      // パイプラインは処理済み社数 / 対象社数。
-      const fill = $('#pbarFill');
-      const inPipeline = s.phase === 'pipeline';
-      const [cur, tot] = inPipeline ? [s.done, s.pipelineTotal] : [s.ingestDone, s.total];
-      fill.style.width = tot ? Math.min(100, Math.round((cur/tot)*100))+'%' : (s.running?'40%':'100%');
+      // ── ① 読み込み（L0） ──
+      const pct = (cur,tot) => tot ? Math.min(100, Math.round((cur/tot)*100))+'%' : '0%';
+      $('#ingestName').textContent = s.phase==='resolve' ? '① 読み込み（HP自動探索あり）' : '① 読み込み';
+      $('#ingestNum').textContent  = `${num(s.ingestDone)} / ${num(s.total)}`;
+      $('#pbarFill').style.width   = pct(s.ingestDone, s.total);
+      $('#ingestNote').textContent = s.ingestRunning
+        ? (s.current ? `処理中: ${s.current}` : '')
+        : (s.ingestDone >= s.total && s.total ? '全行を読み終えました' : '');
+      $('#ingestName').closest('.track').classList.toggle('idle', !s.ingestRunning);
+
+      // ── ② フォーム発見・プラン作成（L1〜L4）──
+      // 分母は取り込みが進むほど増える。取り込み完了まで「/ 2,730」は確定しない。
+      const pipeTrack = $('#pipeTrack');
+      pipeTrack.style.display = s.pipeline ? '' : 'none';
+      if(s.pipeline){
+        const growing = !!s.ingestRunning;   // まだ対象が増える
+        $('#pipeNum').textContent = `${num(s.done)} / ${num(s.pipelineTotal)}${growing?'+':''}`;
+        $('#pbarFillPipe').style.width = pct(s.done, s.pipelineTotal);
+        $('#pipeNote').textContent = s.pipelineRunning
+          ? (s.pipelineCurrent ? `処理中: ${s.pipelineCurrent}` : (s.pipelineMessage||''))
+          : (s.pipelineMessage||'');
+        pipeTrack.classList.toggle('idle', !s.pipelineRunning);
+      }
 
       const stats = [
         stat(`${num(s.ingestDone)}/${num(s.total)}`, '読み込み', 'ok'),
@@ -847,7 +894,7 @@
         s.suppressed ? stat(num(s.suppressed), '競合等で除外', 'warn') : '',
         s.requeued ? stat(num(s.requeued), '再取り込み', 'ok') : '',
         s.skipped ? stat(num(s.skipped), 'スキップ') : '',
-        s.pipeline ? stat(`${num(s.done)}/${num(s.pipelineTotal)}`, '発見処理') : '',
+        s.pipeline ? stat(`${num(s.done)}/${num(s.pipelineTotal)}${s.ingestRunning?'+':''}`, '発見処理') : '',
         s.pipeline ? stat(num(s.pendingApproval), '承認待ちへ', 'ok') : '',
         s.pipeline && s.notFound ? stat(num(s.notFound), 'フォーム未発見', 'warn') : '',
         s.pipeline && s.excluded ? stat(num(s.excluded), '自動除外', 'warn') : '',

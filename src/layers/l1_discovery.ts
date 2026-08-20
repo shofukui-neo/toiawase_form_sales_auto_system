@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio/slim';
 import { XMLParser } from 'fast-xml-parser';
 import { baseUrl, normalizeDomain, resolveUrl, sameSite } from '../utils/url.js';
-import { BrowserSession } from '../browser/browser.js';
+import { BrowserSession, withBrowserSlot } from '../browser/browser.js';
 import { extractFields } from '../browser/extract.js';
 import { fetchPage as httpFetchPage } from '../utils/http.js';
 import { logger } from '../utils/logger.js';
@@ -160,6 +160,11 @@ async function collectCandidates(domain: string, base: string): Promise<{ url: s
 /** Browser-render a candidate URL and check for a real form (catches SPA/JS forms). */
 async function browserConfirm(urls: string[]): Promise<DiscoveryResult | null> {
   if (urls.length === 0) return null;
+  // 取り込みと送信が並走するので、Chromium を起こす前にグローバル枠を取る。
+  return withBrowserSlot(() => browserConfirmInSlot(urls));
+}
+
+async function browserConfirmInSlot(urls: string[]): Promise<DiscoveryResult | null> {
   const session = new BrowserSession({ seed: 7 });
   try {
     const page = await session.open();
