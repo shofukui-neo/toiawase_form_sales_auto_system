@@ -1,10 +1,10 @@
 /**
- * 一斉送信（全項目クリアのみ / 随時送信）の実動作確認。
+ * 一斉送信（全項目クリアのみ / 随時送信 / 並列送信）の実動作確認。
  * ローカルのテストフォームサーバに対して実際に送信まで行う。外部ネットワーク不要。
  */
 process.env.DB_PATH = './data/smoke-bulk.db';
 process.env.SENDER_COMPANY = '株式会社ネオキャリア';
-process.env.SENDER_PERSON = '福井 翔';
+process.env.SENDER_PERSON = '福井 聖';
 process.env.SENDER_EMAIL = 'sho.fukui@example.com';
 process.env.SENDER_PHONE = '03-1234-5678';
 process.env.SENDER_KANA_SEI = 'フクイ';
@@ -19,6 +19,9 @@ process.env.SEND_WINDOW_END = '24';
 process.env.DAILY_SEND_LIMIT = '9999';
 process.env.SEND_MIN_INTERVAL_MS = '200';
 process.env.SEND_MAX_INTERVAL_MS = '400';
+// 並列送信の確認用。3社を同時に処理できるはず。
+process.env.SEND_CONCURRENCY = '3';
+process.env.BROWSER_MAX_CONCURRENCY = '3';
 
 import { rmSync } from 'node:fs';
 import type { DetectedField, FormSchema } from '../src/types.js';
@@ -57,6 +60,11 @@ async function main() {
 
   try {
     const cleanId = await prepare('クリーン株式会社', 'clean.example.test');
+    // 並列送信を観測するための追加のクリーン企業。
+    const cleanIds = [cleanId];
+    for (let i = 2; i <= 4; i++) {
+      cleanIds.push(await prepare(`クリーン株式会社${i}`, `clean${i}.example.test`));
+    }
     const brokenId = await prepare('問題あり株式会社', 'broken.example.test');
 
     // 「問題あり」側に、埋められない必須項目を後から足す（＝全項目クリアではない）。
@@ -72,15 +80,22 @@ async function main() {
     check('クリーンは送信可', assessSendReadiness(companies.byId(cleanId)!).ready);
     const brokenCheck = assessSendReadiness(companies.byId(brokenId)!);
     check('問題ありは送信対象外', !brokenCheck.ready, brokenCheck.issues.map((i) => i.label).join(' / '));
-    check('両社とも承認待ち', companies.byId(cleanId)!.status === 'PENDING_APPROVAL' && companies.byId(brokenId)!.status === 'PENDING_APPROVAL');
+    check('全社とも承認待ち', [...cleanIds, brokenId].every((id) => companies.byId(id)!.status === 'PENDING_APPROVAL'));
 
     // follow=true でも、取り込みが動いていなければ対象を出し切った時点で終了する。
     const started = startBulkSend({ follow: true, actor: 'smoke' });
     check('一斉送信を開始', started.started, started.message);
+    // 送信中の同時実行数を観測する（並列送信になっているかの確認）。
+    let peakActive = 0;
+    let last = '';
+    const t0 = Date.now();
     for (;;) {
       const s = bulkStatus();
+      peakActive = Math.max(peakActive, s.active.length);
+      const line = `${s.active.length}社同時 | ${s.message}`;
+      if (line !== last) { console.log(`  t+${((Date.now()-t0)/1000).toFixed(1)}s ${line}`); last = line; }
       if (!s.running) break;
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 100));
     }
     const fin = bulkStatus();
     console.log('\nbulk:', {
@@ -89,8 +104,13 @@ async function main() {
     });
     console.log('results:', fin.results);
 
-    check('送信成功は 1 社', fin.success === 1, `success=${fin.success} failed=${fin.failed}`);
-    check('クリーンは送信済み', companies.byId(cleanId)!.status === 'SUBMITTED_SUCCESS', companies.byId(cleanId)!.status);
+    check('送信成功は 4 社', fin.success === 4, `success=${fin.success} failed=${fin.failed}`);
+    check('並列で送信している', peakActive >= 2, `同時送信のピーク=${peakActive}（設定=${fin.concurrency}）`);
+    check(
+      'クリーンは全社送信済み',
+      cleanIds.every((id) => companies.byId(id)!.status === 'SUBMITTED_SUCCESS'),
+      cleanIds.map((id) => companies.byId(id)!.status).join(' / '),
+    );
     check('問題ありは未送信のまま', companies.byId(brokenId)!.status === 'PENDING_APPROVAL', companies.byId(brokenId)!.status);
     check('問題ありは送信対象として数えられている', fin.blocked === 1, `blocked=${fin.blocked}`);
     check('取り込み停止中は自然終了する', fin.stopReason === '送信対象がなくなりました', String(fin.stopReason));

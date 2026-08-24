@@ -2,7 +2,7 @@
 process.env.DB_PATH = './data/smoke-readiness.db';
 process.env.SENDER_COMPANY ||= 'ネオキャリア株式会社';
 process.env.SENDER_PRODUCT ||= 'MOCHICA';
-process.env.SENDER_PERSON ||= '福井 翔';
+process.env.SENDER_PERSON ||= '福井 聖';
 process.env.SENDER_EMAIL ||= 'sho.fukui@neo-career.co.jp';
 process.env.SENDER_PHONE ||= '03-0000-0000';
 process.env.LOG_LEVEL ||= 'warn';

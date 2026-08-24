@@ -15,13 +15,34 @@ export interface PacingDecision {
 }
 
 /**
+ * 送信可能時間帯の判定。
+ *
+ * 既定は 0-24（＝24時間送信）。フォーム送信は相手の受信箱を鳴らさないので、
+ * 夜間・営業時間外でも送って構わない、というのが運用上の既定方針。
+ *
+ * - `start <= 0 && end >= 24`（既定）や `start === end` は「常時開いている」。
+ *   `end = 24` を `hour >= 24` で比較すると常に false になる偶然に頼らず、
+ *   ここで明示的に開けておく。
+ * - `start > end`（例: 20-6）は日をまたぐ夜間帯として扱う。夜だけ送りたい、
+ *   という設定を書いたつもりが 1 社も送れない、という事故を防ぐ。
+ */
+export function withinSendWindow(hour: number): boolean {
+  const start = config.sendWindowStart;
+  const end = config.sendWindowEnd;
+  if (start === end) return true; // 幅ゼロ＝制限なしと解釈する
+  if (start <= 0 && end >= 24) return true; // 24時間送信（既定）
+  if (start < end) return hour >= start && hour < end;
+  return hour >= start || hour < end; // 日をまたぐ夜間帯 (例: 20-6)
+}
+
+/**
  * Pacing gate for the Execute (final send) phase only — Plan/dry-run is
  * unlimited. Enforces the daily cap and the allowed sending window (spec §4-L4
  * pacing, §9 frequency/time-of-day control).
  */
 export function canSendNow(now = new Date()): PacingDecision {
   const hour = now.getHours();
-  if (hour < config.sendWindowStart || hour >= config.sendWindowEnd) {
+  if (!withinSendWindow(hour)) {
     return {
       allowed: false,
       reason: `outside send window (${config.sendWindowStart}-${config.sendWindowEnd}h, now ${hour}h)`,

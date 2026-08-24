@@ -227,7 +227,7 @@
           </label>
           <label><input type="checkbox" id="optAutoSend">
             <span>取り込みと同時に「問題のない企業」から自動で送信する（随時送信）
-              <span class="sub">取り込み・フォーム発見と並走して一斉送信を走らせます。<b>すべての項目に問題がない企業だけ</b>が対象で、必須の未入力・誤り疑い・非適格フォームがある企業は送信されません（「③ 送信」で理由を確認できます）。送信間隔・日次上限・送信可能時間帯は維持されます。</span></span>
+              <span class="sub">取り込み・フォーム発見と並走して一斉送信を走らせます。<b>すべての項目に問題がない企業だけ</b>が対象で、必須の未入力・誤り疑い・非適格フォームがある企業は送信されません（「③ 送信」で理由を確認できます）。送信は複数社を並列で処理し、時間帯の制限なく（夜間・営業時間外でも）進みます。送信間隔と日次上限は維持されます。</span></span>
           </label>
           <label><input type="checkbox" id="optSkipKnown" checked>
             <span>すでに取り込んだ企業はスキップする
@@ -296,7 +296,8 @@
         <p class="hint">
           <b>すべての項目に問題がない企業だけ</b>を送信します。
           必須の未入力・誤り疑い・非適格フォーム・抑制対象のいずれかがある企業は自動的に除外され、下の「保留」に理由付きで並びます。<br>
-          取り込みと並走できます — 取り込み中に準備ができた企業から随時送信されます。送信間隔・日次上限・送信可能時間帯は常に維持されます。
+          取り込みと並走できます — 取り込み中に準備ができた企業から随時送信されます。
+          複数社を<b id="sendConcurrency">並列</b>で処理し、<b>夜間・営業時間外でも</b>送信します（送信間隔と日次上限は常に維持されます）。
         </p>
         <div class="statgrid" id="sendStats"></div>
         <div class="import-actions">
@@ -485,8 +486,15 @@
         stat(num(s.readyCount), '送信可能（全項目クリア）', 'ok'),
         stat(num(s.blockedCount), '保留（項目に問題）', s.blockedCount?'warn':''),
         stat(num(s.candidateTotal), '候補総数'),
-        stat(s.paceAllowed?'可':'不可', '送信時間帯', s.paceAllowed?'ok':'bad'),
+        stat(s.paceAllowed?'可':'不可', '送信可否', s.paceAllowed?'ok':'bad'),
+        stat((s.concurrency||1)+' 並列', '同時送信数'),
       ].join('');
+      if (s.concurrency) {
+        const w = s.sendWindow || {};
+        const always = (w.start<=0 && w.end>=24) || w.start===w.end;
+        $('#sendConcurrency').textContent = `${s.concurrency} 社同時`;
+        $('#sendConcurrency').title = always ? '送信可能時間帯: 24時間' : `送信可能時間帯: ${w.start}時〜${w.end}時`;
+      }
       $('#sendableTitle').innerHTML = `送信可能（全項目クリア） ${num(s.readyCount)} 社`
         + (s.truncated?` <span class="hint">— 候補 ${num(s.candidateTotal)} 社のうち ICP 上位 ${num(s.scanned)} 社を表示（一斉送信は全件を対象にします）</span>`:'');
       $('#sendableBody').innerHTML = s.ready.length
@@ -515,7 +523,7 @@
         api('/api/status'), api('/api/pending'), api('/api/sendable?limit=200'), api('/api/excluded') ]);
       const pace = status['_送信可'];
       const parts = Object.entries(status).filter(([k])=>k!=='_送信可').map(([k,v])=>`${k}: <b>${v}</b>`);
-      parts.push(pace ? '<span class="pace-ok">● 送信可能時間帯</span>' : '<span class="pace-no">● 送信時間外</span>');
+      parts.push(pace ? '<span class="pace-ok">● 送信可能</span>' : '<span class="pace-no">● 送信停止中（時間帯／日次上限）</span>');
       $('#counts').innerHTML = parts.join(' · ');
       $('#pendingPill').textContent = pending.length;
       renderSendable(sendable);
@@ -594,7 +602,8 @@
         snap.truncated ? `（表示は上位 ${snap.scanned} 社分。実際には候補 ${snap.candidateTotal} 社全体から問題のない企業を順に送ります）` : '',
         importing ? '取り込み中の企業も、準備ができ次第随時送信します。' : '',
         '承認待ちの企業も、項目に問題がなければ自動承認して送信します。',
-        '送信間隔・日次上限・送信可能時間帯のルールは維持されます。',
+        `${snap.concurrency||1} 社ずつ並列で送信します（夜間・営業時間外でも送信します）。`,
+        '送信間隔・日次上限のルールは維持されます。',
         'よろしいですか？',
       ].filter(Boolean).join('\n');
       if (!confirm(msg)) return;

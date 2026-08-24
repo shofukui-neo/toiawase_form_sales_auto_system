@@ -25,7 +25,7 @@
 // --- config が env を読む前に、送信者情報とペーシングを確定させる ---
 process.env.SENDER_COMPANY ||= 'ネオキャリア株式会社';
 process.env.SENDER_PRODUCT ||= 'MOCHICA';
-process.env.SENDER_PERSON ||= '福井 翔';
+process.env.SENDER_PERSON ||= '福井 聖';
 process.env.SENDER_EMAIL ||= 'sho.fukui@neo-career.co.jp';
 process.env.HEADLESS ||= 'true';
 process.env.LOG_LEVEL ||= 'info';

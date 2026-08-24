@@ -107,6 +107,16 @@ export interface AppConfig {
    * ここで頭を押さえないと 3万件の後半でメモリを踏み抜く。
    */
   browserConcurrency: number;
+  /**
+   * 一斉送信 (L4 Execute) を何社同時に走らせるか。
+   *
+   * 1社の送信は「フォームを開く → 1文字ずつ入力 → 確認画面 → 送信」で 30-90 秒
+   * かかり、その大半はネットワーク待ちなので、直列だと送信間隔より実処理時間が
+   * 支配的になる。ここを上げると N 社を並行して処理する（送信間隔は
+   * ワーカーごとに独立して効くので、実効スループットは約 N 倍になる）。
+   * 1社 = Chromium 1プロセスなので {@link browserConcurrency} も併せて上がる。
+   */
+  sendConcurrency: number;
   /** リスト取り込み (L0) のバッチ／並列度チューニング。 */
   intake: {
     /** Rows committed per transaction + per progress checkpoint. */
@@ -123,6 +133,11 @@ export interface AppConfig {
     suppressionTab: string;
   };
 }
+
+// browserConcurrency の既定値がこの 2 つから決まるので、config より先に確定させる。
+const INTAKE_CONCURRENCY = Math.max(1, envInt('INTAKE_CONCURRENCY', 3));
+/** 同時送信数。上げるほど Chromium プロセスとメモリを食うので既定は控えめ。 */
+const SEND_CONCURRENCY = Math.max(1, envInt('SEND_CONCURRENCY', 3));
 
 export const config: AppConfig = {
   dbPath: resolve(ROOT, envStr('DB_PATH', './data/app.db')),
@@ -149,16 +164,20 @@ export const config: AppConfig = {
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || null,
   llmModel: envStr('LLM_MODEL', 'claude-sonnet-5'),
   dailySendLimit: envInt('DAILY_SEND_LIMIT', 200),
-  sendWindowStart: envInt('SEND_WINDOW_START', 9),
-  sendWindowEnd: envInt('SEND_WINDOW_END', 19),
+  // 既定は 24 時間送信 (0-24)。フォーム送信はメールと違い相手の受信箱を夜中に
+  // 鳴らさないので、時間帯で止める理由がない。絞りたい場合だけ .env で狭める。
+  sendWindowStart: envInt('SEND_WINDOW_START', 0),
+  sendWindowEnd: envInt('SEND_WINDOW_END', 24),
   sendMinIntervalMs: envInt('SEND_MIN_INTERVAL_MS', 45000),
   sendMaxIntervalMs: envInt('SEND_MAX_INTERVAL_MS', 120000),
   headless: envBool('HEADLESS', true),
-  // 既定 4 = 発見処理 3 (INTAKE_CONCURRENCY) + 送信 1。並走の既定構成そのまま。
-  browserConcurrency: Math.max(1, envInt('BROWSER_MAX_CONCURRENCY', 4)),
+  // 既定 = 発見処理 (INTAKE_CONCURRENCY) + 送信 (SEND_CONCURRENCY)。取り込みと
+  // 一斉送信は並走するので、両方が満載でも枠待ちで固まらない値を既定にする。
+  browserConcurrency: Math.max(1, envInt('BROWSER_MAX_CONCURRENCY', INTAKE_CONCURRENCY + SEND_CONCURRENCY)),
+  sendConcurrency: SEND_CONCURRENCY,
   intake: {
     chunkSize: Math.max(1, envInt('INTAKE_CHUNK_SIZE', 500)),
-    concurrency: Math.max(1, envInt('INTAKE_CONCURRENCY', 3)),
+    concurrency: INTAKE_CONCURRENCY,
     resolveConcurrency: Math.max(1, envInt('INTAKE_RESOLVE_CONCURRENCY', 2)),
   },
   sheets: {

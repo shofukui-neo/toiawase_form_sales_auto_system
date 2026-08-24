@@ -369,7 +369,15 @@ export function createServer() {
     const limit = Math.min(Number(req.query.limit ?? 200) || 200, 1000);
     const snap = sendabilitySnapshot(limit);
     const pace = canSendNow();
-    res.json({ ...snap, paceAllowed: pace.allowed, paceReason: pace.reason ?? null, sending: isBulkRunning() });
+    res.json({
+      ...snap,
+      paceAllowed: pace.allowed,
+      paceReason: pace.reason ?? null,
+      sending: isBulkRunning(),
+      // 画面の説明文（「N 並列で送信します」）に使う。
+      concurrency: config.sendConcurrency,
+      sendWindow: { start: config.sendWindowStart, end: config.sendWindowEnd },
+    });
   });
 
   // 一斉送信: 全項目クリアの企業だけを、承認待ちのものも含めて順に送る。
@@ -381,6 +389,8 @@ export function createServer() {
     }
     const follow = req.body?.follow !== false;
     const limit = Number(req.body?.limit) || undefined;
+    // 同時送信数。未指定なら .env の SEND_CONCURRENCY。
+    const concurrency = Number(req.body?.concurrency) || undefined;
     // 送信待ちが 1 社も無く、取り込みも動いていないなら押し損 — その場で伝える。
     // truncated（候補が上位 N 社で打ち切られている）場合は「0 社」と断定できないので、
     // ワーカーに全件走査させる。
@@ -393,10 +403,15 @@ export function createServer() {
           : '送信対象がありません',
       });
     }
-    const r = startBulkSend({ follow, limit, actor: `auto:${approver()}` });
+    const r = startBulkSend({ follow, limit, concurrency, actor: `auto:${approver()}` });
     if (!r.started) return res.json({ started: 0, message: r.message, running: true });
-    log.info(`一斉送信を開始 (follow=${follow}) — 送信可能 ${snap.readyCount} 社`);
-    return res.json({ started: snap.readyCount || 1, follow, message: r.message });
+    const started = bulkStatus();
+    log.info(
+      `一斉送信を開始 (follow=${follow} 並列=${started.concurrency}) — 送信可能 ${snap.readyCount} 社`,
+    );
+    return res.json({
+      started: snap.readyCount || 1, follow, concurrency: started.concurrency, message: r.message,
+    });
   });
 
   app.post('/api/execute-all/stop', (_req, res) => {
