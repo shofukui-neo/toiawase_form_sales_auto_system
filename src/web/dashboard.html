@@ -297,7 +297,7 @@
           <b>すべての項目に問題がない企業だけ</b>を送信します。
           必須の未入力・誤り疑い・非適格フォーム・抑制対象のいずれかがある企業は自動的に除外され、下の「保留」に理由付きで並びます。<br>
           取り込みと並走できます — 取り込み中に準備ができた企業から随時送信されます。
-          複数社を<b id="sendConcurrency">並列</b>で処理し、<b>夜間・営業時間外でも</b>送信します（送信間隔と日次上限は常に維持されます）。
+          複数社を<b id="sendConcurrency">並列</b>で処理します。<b id="sendWindowNote"></b>（送信間隔と日次上限は常に維持されます）。
         </p>
         <div class="statgrid" id="sendStats"></div>
         <div class="import-actions">
@@ -494,6 +494,11 @@
         const always = (w.start<=0 && w.end>=24) || w.start===w.end;
         $('#sendConcurrency').textContent = `${s.concurrency} 社同時`;
         $('#sendConcurrency').title = always ? '送信可能時間帯: 24時間' : `送信可能時間帯: ${w.start}時〜${w.end}時`;
+        // 説明文は設定から組み立てる。ここを固定文にすると、時間帯を変えた
+        // ときに画面だけ嘘になる（実際に「夜間も送信します」と出続けていた）。
+        $('#sendWindowNote').textContent = always
+          ? '時間帯の制限なし（24時間送信します）'
+          : `送信は ${w.start}時〜${w.end}時のみ。時間外は待機し、${w.start}時に自動で再開します`;
       }
       $('#sendableTitle').innerHTML = `送信可能（全項目クリア） ${num(s.readyCount)} 社`
         + (s.truncated?` <span class="hint">— 候補 ${num(s.candidateTotal)} 社のうち ICP 上位 ${num(s.scanned)} 社を表示（一斉送信は全件を対象にします）</span>`:'');

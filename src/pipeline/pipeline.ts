@@ -8,6 +8,7 @@ import { computeCoverage } from '../layers/coverage.js';
 import { classifyEligibility } from '../crosscutting/eligibility.js';
 import { planSubmission, executeSubmission } from '../layers/l4_submit.js';
 import { preSendCheck, markSent } from '../crosscutting/compliance.js';
+import { verifyContent, summarizeIssues } from '../crosscutting/contentGuard.js';
 import { canSendNow, recordSend } from '../crosscutting/pacing.js';
 import { logger } from '../utils/logger.js';
 
@@ -239,6 +240,30 @@ export async function runExecute(companyId: number): Promise<void> {
 
   const schema = fieldMaps.latest(company.id)!;
   const content = renderContent(company, schema);
+
+  // 送信内容の最終検証（誤送信ガード）。フォーム側のゲートを全部通っても、
+  // 入れる値そのものが壊れていれば送ってはいけない — 氏名・電話番号が設定と
+  // 食い違う、日程調整URLが本文から落ちている、宛名が他社のまま等。
+  // ② の手直し (content_overrides) はフォーム側チェックを素通りするので、
+  // 実際に送る内容を見るこのゲートが最後の砦になる。
+  const verdict = verifyContent(company, schema, content);
+  if (!verdict.ok) {
+    const detail = summarizeIssues(verdict.issues);
+    log.warn(`送信内容の検証に失敗 company=${companyId}: ${detail}`);
+    audit.log({
+      companyId: company.id,
+      layer: 'L4',
+      action: 'content_check_failed',
+      detail: { issues: verdict.issues },
+    });
+    // 送信せず人の確認へ回す。送信済み扱いにも抑制にもしないので、原因を直せば
+    // そのまま送信対象に戻る。
+    transition(company.id, 'NEEDS_REVIEW', { force: true, detail: `送信内容の検証NG: ${detail}` });
+    const pending = submissions.latestForCompany(company.id);
+    if (pending) submissions.setResult(pending.id, 'needs_review', `送信内容の検証NG: ${detail}`);
+    return;
+  }
+
   if (company.status === 'APPROVED') transition(company.id, 'SUBMITTING');
 
   const sub = submissions.latestForCompany(company.id);

@@ -15,8 +15,9 @@ const { canSendNow, withinSendWindow } = await import('../src/crosscutting/pacin
 /**
  * 送信可能時間帯のテスト。
  *
- * 既定は 0-24（24時間送信）。「夜だから送れない」で一斉送信が黙って待機に
- * 入るのが最も痛い事故なので、深夜・早朝を明示的に確かめる。
+ * 既定は 7-23（深夜 23時〜翝7時は送信しない）。深夜に営業連絡が
+ * 飛ぶのも、逆に「夜だから送れない」で一斉送信が黙って待機に入るのも
+ * 痛いので、境界時刻を明示的に確かめる。
  */
 
 function withWindow<T>(start: number, end: number, fn: () => T): T {
@@ -34,7 +35,20 @@ function withWindow<T>(start: number, end: number, fn: () => T): T {
 
 const ALL_HOURS = Array.from({ length: 24 }, (_, h) => h);
 
-test('既定 (0-24) は 24 時間ずっと送信できる', () => {
+test('現行設定（.env 込み）は深夜を止め、日中は通す (7-23)', () => {
+  // ここだけは withWindow で上書きせず、.env を読んだ後の実効値を見る。
+  // .env や config の既定が 24 時間送信に戻されたらここで落ちる。
+  assert.equal(config.sendWindowStart, 7);
+  assert.equal(config.sendWindowEnd, 23);
+  for (const h of [23, 0, 2, 4, 6]) {
+    assert.equal(withinSendWindow(h), false, `深夜 ${h}時に送信できてしまう`);
+  }
+  for (const h of [7, 9, 12, 18, 22]) {
+    assert.equal(withinSendWindow(h), true, `${h}時が送信不可になっている`);
+  }
+});
+
+test('0-24 を明示指定したときだけ 24 時間送信になる', () => {
   withWindow(0, 24, () => {
     for (const h of ALL_HOURS) {
       assert.equal(withinSendWindow(h), true, `${h}時が送信不可になっている`);
@@ -68,7 +82,20 @@ test('start > end は日をまたぐ夜間帯として扱う (20-6)', () => {
   });
 });
 
-test('canSendNow: 既定設定なら深夜 3 時でも送信できる', () => {
+test('canSendNow: 現行設定では深夜 3 時の送信を拒む', () => {
+  const midnight = new Date(2026, 0, 15, 3, 0, 0);
+  const decision = canSendNow(midnight);
+  assert.equal(decision.allowed, false);
+  assert.match(decision.reason ?? '', /outside send window/);
+});
+
+test('canSendNow: 現行設定でも日中（10時）は送れる', () => {
+  const daytime = new Date(2026, 0, 15, 10, 0, 0);
+  const decision = canSendNow(daytime);
+  assert.equal(decision.allowed, true, decision.reason ?? '');
+});
+
+test('canSendNow: 0-24 を明示指定すれば深夜 3 時でも送信できる', () => {
   withWindow(0, 24, () => {
     const midnight = new Date(2026, 0, 15, 3, 0, 0);
     const decision = canSendNow(midnight);

@@ -3,6 +3,8 @@ import { companies, fieldMaps, submissions } from '../db/repositories.js';
 import { computeCoverage, type Coverage, type FieldReview } from '../layers/coverage.js';
 import { classifyEligibility, type IneligibleReason } from '../crosscutting/eligibility.js';
 import { preSendCheck } from '../crosscutting/compliance.js';
+import { verifyContent } from '../crosscutting/contentGuard.js';
+import { renderContent } from '../layers/l3_content.js';
 import { STATUS_JA } from './intake.js';
 
 /**
@@ -33,6 +35,7 @@ export type SendIssueCode =
   | 'missing_required'
   | 'suspect_field'
   | 'required_unfilled'
+  | 'content_check'
   /* --- warnings (送信は止めない) --- */
   | 'captcha'
   | 'auto_choice';
@@ -141,6 +144,24 @@ export function assessSendReadiness(company: CompanyRow): SendReadiness {
       issues.push({
         code: 'required_unfilled',
         label: `必須 ${cov.coverage.requiredFilled}/${cov.coverage.requiredTotal} しか埋まりません`,
+      });
+    }
+
+    // 送信内容そのものの検証（氏名・電話番号・日程調整URL・文面）。
+    // runExecute にも同じゲートがあるが、そちらは「送信の瞬間に止める」ための
+    // もの。ここで先に落としておくと、②の一覧で理由が見えるうえ、一斉送信の
+    // ワーカーが最初から候補として拾わない。
+    try {
+      const verdict = verifyContent(company, schema, renderContent(company, schema));
+      for (const v of verdict.issues) {
+        issues.push({ code: 'content_check', label: v.label, detail: v.detail });
+      }
+    } catch (e) {
+      // テンプレート読み込み失敗など。内容を確認できない以上は送らせない。
+      issues.push({
+        code: 'content_check',
+        label: '送信内容を検証できません',
+        detail: (e as Error).message,
       });
     }
 

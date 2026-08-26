@@ -8,6 +8,11 @@ import { config } from '../src/config.js';
 // DB を開く前に差し替える。db() は最初の呼び出し時に config.dbPath を読む。
 const tmp = mkdtempSync(join(tmpdir(), 'bulk-send-'));
 config.dbPath = join(tmp, 'test.db');
+// 送信可能時間帯を明示的に開けておく。既定は 7-23（深夜は送らない）なので、
+// これを固定しないと「深夜に CI を回すと落ちるテスト」になる。ここで見たいのは
+// 候補の配り方であって、時間帯ゲートではない。
+config.sendWindowStart = 0;
+config.sendWindowEnd = 24;
 
 const { closeDb } = await import('../src/db/db.js');
 const { companies } = await import('../src/db/repositories.js');

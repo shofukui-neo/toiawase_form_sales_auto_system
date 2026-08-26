@@ -26,8 +26,30 @@ interface ParsedTemplate {
   body: string;
 }
 
-/** Load a markdown template with a `--- subject: ... ---` front-matter line. */
+const _templates = new Map<string, ParsedTemplate>();
+
+/**
+ * Load a markdown template with a `--- subject: ... ---` front-matter line.
+ *
+ * Memoised: renderContent now runs on every send-readiness poll (up to 200
+ * companies per refresh) on top of per-plan/per-execute, and re-reading the
+ * same file that many times is pure syscall overhead. Call
+ * {@link clearTemplateCache} after editing a template in a long-lived process.
+ */
 function loadTemplate(name: string): ParsedTemplate {
+  const hit = _templates.get(name);
+  if (hit) return hit;
+  const parsed = parseTemplate(name);
+  _templates.set(name, parsed);
+  return parsed;
+}
+
+/** Drop the memoised templates (after editing config/templates/*.md). */
+export function clearTemplateCache(): void {
+  _templates.clear();
+}
+
+function parseTemplate(name: string): ParsedTemplate {
   const raw = readFileSync(resolve(ROOT, 'config/templates', `${name}.md`), 'utf8');
   const fm = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
   if (!fm) return { subject: '', body: raw.trim() };
@@ -88,7 +110,8 @@ function tidy(body: string): string {
  * made HERE, deterministically, rather than being discovered at type-time: the
  * approval preview shows exactly the text that will be submitted.
  */
-function messageLimit(schema: FormSchema | undefined): number | null {
+/** 本文欄の maxlength（無ければ null）。送信直前の内容検証でも使う。 */
+export function messageLimit(schema: FormSchema | undefined): number | null {
   const sel = schema?.mappings?.find((m) => m.role === 'message')?.selector;
   if (!sel) return null;
   return schema?.fields?.find((f) => f.selector === sel)?.maxLength ?? null;

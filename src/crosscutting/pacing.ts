@@ -17,10 +17,14 @@ export interface PacingDecision {
 /**
  * 送信可能時間帯の判定。
  *
- * 既定は 0-24（＝24時間送信）。フォーム送信は相手の受信箱を鳴らさないので、
- * 夜間・営業時間外でも送って構わない、というのが運用上の既定方針。
+ * 既定は 7-23 — **深夜（23時〜翌7時）は送信しない**。フォーム送信は相手の
+ * 受信箱を夜中に鳴らすわけではないが、送信時刻は問い合わせ履歴に残り、
+ * 深夜の営業連絡は受け手の心証を損ねるため、既定では止める。
  *
- * - `start <= 0 && end >= 24`（既定）や `start === end` は「常時開いている」。
+ * 止まるのは本送信 (L4 Execute) だけ。リスト取り込み・フォーム発見・プラン
+ * 作成は時間帯に関係なく走り続けるので、朝いちで送れる在庫は夜のうちに貯まる。
+ *
+ * - `start <= 0 && end >= 24` や `start === end` は「常時開いている」。
  *   `end = 24` を `hour >= 24` で比較すると常に false になる偶然に頼らず、
  *   ここで明示的に開けておく。
  * - `start > end`（例: 20-6）は日をまたぐ夜間帯として扱う。夜だけ送りたい、
@@ -30,7 +34,7 @@ export function withinSendWindow(hour: number): boolean {
   const start = config.sendWindowStart;
   const end = config.sendWindowEnd;
   if (start === end) return true; // 幅ゼロ＝制限なしと解釈する
-  if (start <= 0 && end >= 24) return true; // 24時間送信（既定）
+  if (start <= 0 && end >= 24) return true; // 24時間送信（明示指定したときだけ）
   if (start < end) return hour >= start && hour < end;
   return hour >= start || hour < end; // 日をまたぐ夜間帯 (例: 20-6)
 }

@@ -166,8 +166,10 @@ export const config: AppConfig = {
   dailySendLimit: envInt('DAILY_SEND_LIMIT', 200),
   // 既定は 24 時間送信 (0-24)。フォーム送信はメールと違い相手の受信箱を夜中に
   // 鳴らさないので、時間帯で止める理由がない。絞りたい場合だけ .env で狭める。
-  sendWindowStart: envInt('SEND_WINDOW_START', 0),
-  sendWindowEnd: envInt('SEND_WINDOW_END', 24),
+  // 既定 7-23 = 深夜（23時〜翌7時）は送らない。設定漏れの環境が真夜中に
+  // 送り始めるより、既定を安全側に倒して 24 時間送信は明示指定にする。
+  sendWindowStart: envInt('SEND_WINDOW_START', 7),
+  sendWindowEnd: envInt('SEND_WINDOW_END', 23),
   sendMinIntervalMs: envInt('SEND_MIN_INTERVAL_MS', 45000),
   sendMaxIntervalMs: envInt('SEND_MAX_INTERVAL_MS', 120000),
   headless: envBool('HEADLESS', true),
