@@ -30,6 +30,20 @@ import { computeCoverage } from '../layers/coverage.js';
 import { classifyEligibility } from '../crosscutting/eligibility.js';
 import { transition } from '../core/stateMachine.js';
 import { buildReview } from './review.js';
+import { registerTrackingRoutes } from './tracking.js';
+import {
+  startEmailCampaign,
+  stopEmailCampaign,
+  emailCampaignStatus,
+  isCampaignRunning,
+  reconcileOnBoot,
+  type EmailCampaignOptions,
+} from '../pipeline/emailCampaign.js';
+import { discoverEmailsForCompany } from '../pipeline/emailDiscovery.js';
+import { contacts, emailSends, emailEvents, emailResolutions } from '../db/emailRepositories.js';
+import { verifyTransport } from '../layers/m1_transport.js';
+import { renderEmail } from '../layers/m3_email_content.js';
+import { clickTrackingEnabled } from '../crosscutting/tracking.js';
 import type { SuppressionReason } from '../types.js';
 import { logger } from '../utils/logger.js';
 
@@ -47,9 +61,15 @@ export function createServer() {
   // 日本語 CSV でおよそ 1,000 社で超え、取り込みが 413 (HTML のスタックトレース)
   // で落ちる — 実運用のリストが通るサイズまで広げる。
   app.use(express.json({ limit: '32mb' }));
+  // RFC 8058 のワンクリック配信停止は application/x-www-form-urlencoded で POST される。
+  app.use(express.urlencoded({ extended: false, limit: '16kb' }));
 
   // Serve Plan screenshots (and any artifact) read-only.
   app.use('/artifacts', express.static(config.artifactsDir));
+
+  // メールのクリック検知・配信停止。受信者のブラウザから直接叩かれる公開面
+  // なので、認証を挟む API 群とは分けて先に登録する。
+  registerTrackingRoutes(app);
 
   const html = readFileSync(resolve(__dirname, 'dashboard.html'), 'utf8');
   app.get('/', (_req, res) => res.type('html').send(html));
@@ -423,6 +443,99 @@ export function createServer() {
     res.json(bulkStatus());
   });
 
+  /* ------------------------- 一斉メール送信 (M) ------------------------- */
+
+  // 画面を開いた時点の状況。SMTP・計測URLの設定漏れをここで見せる。
+  app.get('/api/email/overview', (_req, res) => {
+    const s = emailCampaignStatus();
+    res.json({
+      campaign: s,
+      smtpConfigured: config.email.enabled,
+      smtpFrom: config.email.from || null,
+      trackingEnabled: clickTrackingEnabled(),
+      publicBaseUrl: config.publicBaseUrl,
+      allowGuessed: config.email.allowGuessed,
+      dailyLimit: config.email.dailyLimit,
+      sendWindow: { start: config.sendWindowStart, end: config.sendWindowEnd },
+      contactsTotal: contacts.countAll(),
+      companiesWithContact: contacts.countCompaniesWithUsable(config.email.allowGuessed),
+      domainsSearched: emailResolutions.count(),
+      clicks: emailEvents.countByKind('click'),
+      clickedCompanies: emailEvents.uniqueClickedCompanies(),
+      unsubscribes: emailEvents.countByKind('unsubscribe'),
+      sending: isCampaignRunning(),
+    });
+  });
+
+  // SMTP 接続テスト。認証情報の間違いを送信前に見つけるためのもの。
+  app.post('/api/email/verify', async (_req, res) => {
+    res.json(await verifyTransport());
+  });
+
+  // 送信せずに本文を確認する。クリック計測リンクは実際に発行しないので、
+  // プレビューを開いただけでクリック数が汚れることはない。
+  app.get('/api/email/preview/:id', (req, res) => {
+    const company = companies.byId(Number(req.params.id));
+    if (!company) return res.status(404).json({ error: '企業が見つかりません' });
+    const mail = renderEmail(company);
+    const contact = contacts.bestForCompany(company.id, config.email.allowGuessed);
+    return res.json({
+      to: contact?.email ?? null,
+      contactSource: contact?.source ?? null,
+      subject: mail.subject,
+      text: mail.text,
+      html: mail.html,
+      trackedLinks: mail.links.map((l) => ({ url: l.url, label: l.label })),
+    });
+  });
+
+  // 単発のアドレス探索（1社だけ試したいとき）。
+  app.post('/api/email/discover/:id', async (req, res) => {
+    try {
+      const r = await discoverEmailsForCompany(Number(req.params.id), {
+        includeGuessed: req.body?.includeGuessed === true,
+        force: req.body?.force === true,
+      });
+      res.json({ ...r, contacts: contacts.byCompany(Number(req.params.id)) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/email/campaign', async (req, res) => {
+    const opts: EmailCampaignOptions = {
+      name: typeof req.body?.name === 'string' ? req.body.name : undefined,
+      target: req.body?.target === 'all' ? 'all' : 'form_unreachable',
+      discover: req.body?.discover !== false,
+      follow: req.body?.follow !== false,
+      limit: Number(req.body?.limit) > 0 ? Number(req.body.limit) : undefined,
+      actor: `email:${approver()}`,
+    };
+    const r = await startEmailCampaign(opts);
+    res.json(r);
+  });
+
+  app.post('/api/email/campaign/stop', (_req, res) => {
+    const stopped = stopEmailCampaign();
+    res.json({
+      ok: stopped,
+      message: stopped ? '次の送信区切りで中断します' : '実行中の一斉メール送信はありません',
+    });
+  });
+
+  app.get('/api/email/campaign/status', (_req, res) => res.json(emailCampaignStatus()));
+
+  // 送信済み一覧とクリック履歴。
+  app.get('/api/email/sends', (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 100) || 100, 500);
+    res.json({ sends: emailSends.recent(limit) });
+  });
+
+  app.get('/api/email/clicks', (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 100) || 100, 500);
+    res.json({ clicks: emailEvents.recentClicks(limit) });
+  });
+
   // Body-parser failures (oversized list, truncated JSON) otherwise answer with an
   // HTML stack trace, which the dashboard shows verbatim in a toast. Answer JSON
   // with a message that says what to do about it.
@@ -450,6 +563,11 @@ export function serve(port = 4599): void {
     // A list of 3万件 outlives any single process run. If the previous one was
     // killed mid-import, pick it up from the last checkpoint instead of asking
     // the operator to paste (and re-process) the whole list again.
+    // 送信中に落ちた queued 行は送達不明。二重送信を避けるため skipped にする。
+    const stale = reconcileOnBoot();
+    if (stale > 0) {
+      console.log(`  ⚠ 送達不明のメール ${stale} 件を保留にしました（「メール」タブで確認できます）\n`);
+    }
     const resumed = resumeUnfinishedOnBoot(true);
     if (resumed) {
       console.log(`  ↻ 未完了の取り込み #${resumed.id} を再開しました（続きから処理します）\n`);

@@ -187,6 +187,7 @@
     <button class="tab-btn active" data-tab="import">① リスト取り込み</button>
     <button class="tab-btn" data-tab="review">② 確認・承認 <span class="pill" id="pendingPill">0</span></button>
     <button class="tab-btn" data-tab="send">③ 送信 <span class="pill" id="readyPill">0</span></button>
+    <button class="tab-btn" data-tab="email">✉ メール <span class="pill" id="clickPill">0</span></button>
   </nav>
 
   <div class="wrap">
@@ -326,7 +327,57 @@
         </table>
       </div>
     </section>
+
+    <section class="tab" id="tab-email">
+      <div class="panel">
+        <h2>一斉メール送信</h2>
+        <p class="hint">
+          フォーム送信とは別のチャネルです。<b>企業サイトに掲載されているアドレス</b>を自動で探し、そこへ送ります。
+          本文中のリンクはクリックを検知でき、配信停止リンクを押した企業は<b>フォーム送信からも自動的に除外</b>されます。<br>
+          <span id="emailSetupNote"></span>
+        </p>
+
+        <div class="statgrid" id="emailStats"></div>
+
+        <div class="opts">
+          <label><input type="radio" name="emailTarget" value="form_unreachable" checked>
+            <span>フォームで到達できなかった企業だけに送る（推奨）
+              <span class="sub">フォーム未発見・解析失敗・CAPTCHA・送信失敗の企業が対象です。フォームとメールで二重に接触しません。</span></span>
+          </label>
+          <label><input type="radio" name="emailTarget" value="all">
+            <span>送信対象の企業すべてに送る
+              <span class="sub">フォーム送信の候補にも送ります。同じ企業に両方から届く可能性があるためご注意ください（送信済み・抑制中の企業は常に除外されます）。</span></span>
+          </label>
+          <label><input type="checkbox" id="emailDiscover" checked>
+            <span>宛先が未登録の企業は、その場でアドレスを探索する
+              <span class="sub">会社概要・お問い合わせページから掲載アドレスを探します。一度探した企業は結果を保存し、二度は探しません。</span></span>
+          </label>
+        </div>
+
+        <div class="import-actions">
+          <button id="emailStart" class="primary">✉ 一斉メール送信を開始</button>
+          <button id="emailStop" style="display:none">■ 中断</button>
+          <button id="emailVerify">SMTP接続テスト</button>
+          <span class="hint" id="emailMsg" style="margin:0"></span>
+        </div>
+
+        <div class="progress" id="emailProgress" style="display:none">
+          <div class="hint" id="emailProgressLabel" style="margin:0"></div>
+          <div class="logbox" id="emailLog" style="display:none"></div>
+        </div>
+
+        <div class="section-title" style="margin-top:18px">クリック履歴</div>
+        <div class="hint" style="margin:0 0 8px">メール本文中のリンクが押されると、ここに記録されます。</div>
+        <table class="tbl"><thead><tr><th>日時</th><th>企業</th><th>宛先</th><th>リンク</th></tr></thead>
+          <tbody id="clickBody"><tr><td colspan="4" class="ftype">まだクリックはありません</td></tr></tbody></table>
+
+        <div class="section-title" style="margin-top:18px">送信履歴</div>
+        <table class="tbl"><thead><tr><th>ID</th><th>企業</th><th>宛先</th><th>状態</th><th>クリック</th><th>送信日時</th></tr></thead>
+          <tbody id="emailSendBody"><tr><td colspan="6" class="ftype">まだ送信していません</td></tr></tbody></table>
+      </div>
+    </section>
   </div>
+
 
   <div class="toast" id="toast"></div>
   <dialog id="lightbox"><img id="lbimg" src="" alt="preview" /></dialog>
@@ -355,6 +406,7 @@
       document.querySelectorAll('.tab').forEach(s=>s.classList.toggle('active', s.id==='tab-'+name));
       if(name==='import') loadCompanies();
       if(name==='send') load();
+      if(name==='email') loadEmailOverview();
     }
     document.querySelectorAll('.tab-btn').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
 
@@ -1067,9 +1119,134 @@
       catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
     });
 
+
+    // ============================ 一斉メール送信 ============================
+    let emailTimer = null;
+
+    function emailTargetValue(){
+      const el = document.querySelector('input[name="emailTarget"]:checked');
+      return el ? el.value : 'form_unreachable';
+    }
+
+    async function loadEmailOverview(){
+      let o;
+      try { o = await api('/api/email/overview'); } catch { return; }
+
+      // 設定漏れは最初に、直し方まで書いて出す（SMTP 未設定だと 1 通も送れない）。
+      const notes = [];
+      if(!o.smtpConfigured) notes.push('<b style="color:var(--danger)">SMTP が未設定です</b> — .env に SMTP_HOST / SMTP_USER / SMTP_PASS を設定してサーバーを再起動してください。');
+      else notes.push(`差出人: <b>${esc(o.smtpFrom||'')}</b>`);
+      if(!o.trackingEnabled) notes.push('<b style="color:var(--warn)">クリック検知は無効です</b> — 受信者から到達できる PUBLIC_BASE_URL を設定すると有効になります。');
+      else notes.push(`クリック検知: 有効（${esc(o.publicBaseUrl)}）`);
+      notes.push(`送信可能時間帯 ${o.sendWindow.start}時〜${o.sendWindow.end}時 / 1日 ${o.dailyLimit} 通まで`);
+      $('#emailSetupNote').innerHTML = notes.join('<br>');
+
+      $('#emailStats').innerHTML = [
+        stat(num(o.companiesWithContact), '宛先あり企業', 'ok'),
+        stat(num(o.contactsTotal), '登録アドレス'),
+        stat(num(o.domainsSearched), '探索済みドメイン'),
+        stat(num(o.campaign.sent), '送信済み', 'ok'),
+        stat(num(o.clicks), 'クリック', o.clicks?'ok':''),
+        stat(num(o.clickedCompanies), 'クリック企業'),
+        stat(num(o.unsubscribes), '配信停止', o.unsubscribes?'warn':''),
+      ].join('');
+      $('#clickPill').textContent = num(o.clicks);
+      $('#emailStart').disabled = !o.smtpConfigured || o.sending;
+      renderEmailCampaign(o.campaign);
+      loadClicks();
+      loadEmailSends();
+      return o;
+    }
+
+    function renderEmailCampaign(s){
+      if(!s || s.status === 'none') return false;
+      const running = !!s.running;
+      $('#emailProgress').style.display = (running || s.startedAt) ? 'block' : 'none';
+      $('#emailStop').style.display = running ? '' : 'none';
+      const tally = `送信 ${num(s.sent)} / 失敗 ${num(s.failed)} / 宛先なし ${num(s.noContact)} / 対象外 ${num(s.skipped)}`;
+      $('#emailProgressLabel').innerHTML = `<b>${esc(s.stopping?'中断しています…':(running?'送信中':(s.stopReason||'完了')))}</b>`
+        + (s.current?` — ${esc(s.current)}`:(s.message?` — ${esc(s.message)}`:'')) + `<br>${tally}`;
+      if(s.recent && s.recent.length){
+        $('#emailLog').style.display='block';
+        $('#emailLog').innerHTML = s.recent.slice(-60).reverse().map(r=>
+          `<div>${esc(r.name)} &lt;${esc(r.email)}&gt; — ${esc(r.status)}${r.detail?` <span style="color:var(--danger)">${esc(r.detail)}</span>`:''}</div>`).join('');
+      }
+      return running;
+    }
+
+    async function pollEmail(){
+      if(emailTimer) clearInterval(emailTimer);
+      const tick = async () => {
+        let s; try { s = await api('/api/email/campaign/status'); } catch { return false; }
+        const running = renderEmailCampaign(s);
+        if(!running){ clearInterval(emailTimer); emailTimer=null; loadEmailOverview(); }
+        return running;
+      };
+      if(await tick()) emailTimer = setInterval(tick, 3000);
+    }
+
+    async function loadClicks(){
+      let r; try { r = await api('/api/email/clicks?limit=100'); } catch { return; }
+      const rows = r.clicks || [];
+      $('#clickBody').innerHTML = rows.length ? rows.map(c=>`<tr>
+        <td class="ftype">${esc((c.ts||'').replace('T',' ').slice(0,19))}</td>
+        <td>${esc(c.name||('#'+(c.company_id??'')))}</td>
+        <td class="ftype">${esc(c.email)}</td>
+        <td>${esc(c.label||'')} <span class="fnote">${esc((c.url||'').slice(0,70))}</span></td>
+      </tr>`).join('') : '<tr><td colspan="4" class="ftype">まだクリックはありません</td></tr>';
+    }
+
+    async function loadEmailSends(){
+      let r; try { r = await api('/api/email/sends?limit=100'); } catch { return; }
+      const rows = r.sends || [];
+      const ST = { sent:'送信済み', failed:'失敗', skipped:'保留', queued:'送信中' };
+      $('#emailSendBody').innerHTML = rows.length ? rows.map(s=>`<tr>
+        <td>${s.id}</td>
+        <td>${esc(s.name)}</td>
+        <td class="ftype">${esc(s.email)}</td>
+        <td>${esc(ST[s.status]||s.status)}${s.detail?` <span class="fnote">${esc(String(s.detail).slice(0,60))}</span>`:''}</td>
+        <td>${s.clicks?`<b style="color:var(--ok)">${s.clicks}</b>`:'0'}</td>
+        <td class="ftype">${esc((s.sent_at||'').replace('T',' ').slice(0,19))}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="ftype">まだ送信していません</td></tr>';
+    }
+
+    $('#emailVerify').addEventListener('click', async()=>{
+      $('#emailMsg').textContent = 'SMTP に接続しています…';
+      try{ const r = await api('/api/email/verify','POST');
+        $('#emailMsg').textContent = (r.ok?'✓ ':'✗ ') + r.detail;
+      }catch(e){ $('#emailMsg').textContent = 'エラー: '+String(e.message).slice(0,120); }
+    });
+
+    $('#emailStart').addEventListener('click', async()=>{
+      const target = emailTargetValue();
+      const msg = [
+        target==='all'
+          ? '送信対象の企業すべてにメールを送ります。フォーム送信の候補にも届きます。'
+          : 'フォームで到達できなかった企業にメールを送ります。',
+        '掲載アドレスが見つかった企業だけが対象で、配信停止された企業には二度と送りません。',
+        'よろしいですか？',
+      ].join('\n');
+      if(!confirm(msg)) return;
+      $('#emailStart').disabled = true;
+      $('#emailMsg').textContent = '送信対象を確認しています…';
+      try{
+        const r = await api('/api/email/campaign','POST',{ target, discover: $('#emailDiscover').checked });
+        $('#emailMsg').textContent = r.message || '';
+        if(!r.started){ $('#emailStart').disabled = false; toast(r.message||'開始できませんでした'); return; }
+        $('#emailProgress').style.display='block';
+        pollEmail();
+      }catch(e){ $('#emailStart').disabled=false; toast('エラー: '+String(e.message).slice(0,90)); }
+    });
+
+    $('#emailStop').addEventListener('click', async()=>{
+      try{ const r = await api('/api/email/campaign/stop','POST'); toast(r.message); }
+      catch(e){ toast('エラー: '+String(e.message).slice(0,90)); }
+    });
+
     // ---- boot ----
     load();
     loadCompanies();
+    loadEmailOverview();
     // Resume in-flight jobs on reload.
     api('/api/execute-all/status').then((s)=>{ if(s && s.running){ switchTab('send'); pollBulk(); } else if(s && s.startedAt){ renderBulk(s); } }).catch(()=>{});
     // 実行中でも「中断中」でも、前回の取り込み状況を復元して表示する

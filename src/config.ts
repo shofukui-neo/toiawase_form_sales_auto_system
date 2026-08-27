@@ -126,12 +126,58 @@ export interface AppConfig {
     /** Parallel HP auto-discovery lookups (each is several web requests). */
     resolveConcurrency: number;
   };
+  /**
+   * 計測リンク（クリック検知・配信停止）の公開ベース URL。
+   *
+   * 受信者のブラウザから到達できる必要があるので `http://localhost:4599` では
+   * 意味がない。未設定ならクリック計測を行わず、本文には実 URL をそのまま
+   * 載せる（届かないリンクを送るより、計測を諦める方が安全）。
+   */
+  publicBaseUrl: string | null;
+  /** 一斉メール送信 (M) の設定。 */
+  email: {
+    /** SMTP に接続できる設定が揃っているか。false ならメール送信機能は動かない。 */
+    enabled: boolean;
+    host: string;
+    port: number;
+    secure: boolean;
+    user: string;
+    pass: string;
+    /** 差出人アドレス。未設定なら SENDER_EMAIL を使う。 */
+    from: string;
+    /** 返信先。未設定なら from。 */
+    replyTo: string;
+    /** 1日あたりの送信上限。SMTP 側の上限（Google Workspace は 2,000/日）に合わせる。 */
+    dailyLimit: number;
+    /** 同時送信数。SMTP は 1 接続で十分速いので既定は控えめ。 */
+    concurrency: number;
+    /** 送信間隔 (ms)。連続送信は迷惑メール判定を招くので必ず空ける。 */
+    minIntervalMs: number;
+    maxIntervalMs: number;
+    /** クリック検知を行うか（publicBaseUrl が必要）。 */
+    trackClicks: boolean;
+    /**
+     * 推測アドレス（サイトに載っていない info@ 等）にも送るか。
+     *
+     * 既定 false。特定電子メール法のオプトイン例外は「自己のメールアドレスを
+     * **公開している** 団体・営業を営む個人」に対する送信を根拠にするため、
+     * 掲載を確認できていないアドレスへの送信はその根拠を失う。
+     */
+    allowGuessed: boolean;
+  };
   sheets: {
     spreadsheetId: string | null;
     keyFile: string | null; // service-account JSON path
     reportTab: string;
     suppressionTab: string;
   };
+}
+
+/** 末尾スラッシュを落とした公開 URL（未設定なら null）。 */
+function publicBase(): string | null {
+  const raw = envStr('PUBLIC_BASE_URL', '').trim();
+  if (!raw) return null;
+  return raw.replace(/\/+$/, '');
 }
 
 // browserConcurrency の既定値がこの 2 つから決まるので、config より先に確定させる。
@@ -181,6 +227,26 @@ export const config: AppConfig = {
     chunkSize: Math.max(1, envInt('INTAKE_CHUNK_SIZE', 500)),
     concurrency: INTAKE_CONCURRENCY,
     resolveConcurrency: Math.max(1, envInt('INTAKE_RESOLVE_CONCURRENCY', 2)),
+  },
+  publicBaseUrl: publicBase(),
+  email: {
+    enabled: Boolean(
+      envStr('SMTP_HOST', '') && envStr('SMTP_USER', '') && envStr('SMTP_PASS', ''),
+    ),
+    host: envStr('SMTP_HOST', ''),
+    port: envInt('SMTP_PORT', 587),
+    // 465 は暗黙TLS、587 は STARTTLS。ポートから既定を決めるので通常は指定不要。
+    secure: envBool('SMTP_SECURE', envInt('SMTP_PORT', 587) === 465),
+    user: envStr('SMTP_USER', ''),
+    pass: envStr('SMTP_PASS', ''),
+    from: envStr('SMTP_FROM', '') || envStr('SENDER_EMAIL', ''),
+    replyTo: envStr('SMTP_REPLY_TO', '') || envStr('SMTP_FROM', '') || envStr('SENDER_EMAIL', ''),
+    dailyLimit: envInt('EMAIL_DAILY_LIMIT', 300),
+    concurrency: Math.max(1, envInt('EMAIL_CONCURRENCY', 2)),
+    minIntervalMs: envInt('EMAIL_MIN_INTERVAL_MS', 8000),
+    maxIntervalMs: envInt('EMAIL_MAX_INTERVAL_MS', 20000),
+    trackClicks: envBool('EMAIL_TRACK_CLICKS', true),
+    allowGuessed: envBool('EMAIL_ALLOW_GUESSED', false),
   },
   sheets: {
     spreadsheetId: process.env.SHEETS_SPREADSHEET_ID || null,

@@ -77,6 +77,26 @@ function applyConditionals(body: string, vars: Record<string, string>): string {
 }
 
 /**
+ * 名前付きテンプレートを変数で描画する（条件ブロック → 置換 → 余白整理）。
+ *
+ * フォーム用とメール用で置換エンジンを二重に持つと、`{{...}}` の書式や
+ * `<!--if:-->` の挙動が片方だけ変わって本文が壊れる。入口をここに一本化する。
+ * 本文の長さ調整 (fitOptional) はフォーム欄の maxlength 固有の話なので含めない。
+ */
+export function renderTemplate(
+  templateName: string,
+  vars: Record<string, string>,
+): { subject: string; body: string } {
+  const tpl = loadTemplate(templateName);
+  return {
+    subject: substitute(tpl.subject, vars),
+    // 条件ブロックを先に処理する。落とすブロックの中の `{{...}}` を
+    // 置換してしまうと、消したはずの値が残骸として本文に出る。
+    body: tidy(substitute(applyConditionals(tpl.body, vars), vars)),
+  };
+}
+
+/**
  * `<!--optional:N-->…<!--/optional-->` — copy we drop, lowest N first, to fit a
  * maxlength. Everything outside these blocks is load-bearing: the greeting, the
  * reason we are writing, the CTA, the signature (§9) and the opt-out notice.

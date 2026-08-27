@@ -135,3 +135,99 @@ CREATE TABLE IF NOT EXISTS send_ledger (
   sent_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_send_ledger_day ON send_ledger(day);
+
+-- ============================ 一斉メール送信 (M) =============================
+-- フォーム送信とは独立した第2チャネル。フォームが見つからない／送れない企業に
+-- 公開されているメールアドレス宛に送る。抑制リスト (suppression) は両チャネルで
+-- 共有するので、メールで配信停止された企業にはフォームからも二度と接触しない。
+
+-- 企業のメールアドレス。1社に複数ありうる（info@ と recruit@ など）。
+CREATE TABLE IF NOT EXISTS contacts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  email      TEXT NOT NULL,
+  -- 出所。`published` = 企業サイト上に実際に掲載されていたアドレス。
+  -- `list` = 取り込みリストの列。`guessed` = info@ 等の推測（既定では送らない）。
+  source     TEXT NOT NULL,
+  -- ローカル部の種別 (info/contact/inquiry/sales/recruit/other)。宛先の優先順位に使う。
+  role_kind  TEXT,
+  confidence REAL NOT NULL DEFAULT 0.5,
+  -- MX レコードが引けたか。0 のアドレスに送るとバウンスが積み上がり送信評価が落ちる。
+  mx_ok      INTEGER NOT NULL DEFAULT 0,
+  page_url   TEXT,                            -- どのページに載っていたか（根拠）
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (company_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
+
+-- メール探索の結果キャッシュ（ドメイン単位）。見つからなかった場合も記録して
+-- 同じサイトを二度クロールしない。
+CREATE TABLE IF NOT EXISTS email_resolutions (
+  domain     TEXT PRIMARY KEY,
+  found      INTEGER NOT NULL DEFAULT 0,
+  detail     TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 一斉メール送信ジョブ。取り込みジョブと同じく中断・再開できる。
+CREATE TABLE IF NOT EXISTS email_campaigns (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  template      TEXT NOT NULL DEFAULT 'mochica_email',
+  status        TEXT NOT NULL DEFAULT 'running',  -- running/paused/done/failed
+  options_json  TEXT NOT NULL DEFAULT '{}',
+  counters_json TEXT NOT NULL DEFAULT '{}',
+  error         TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_email_campaigns_status ON email_campaigns(status);
+
+-- 1 通 = 1 行。送信前に作って queued にし、送信できたら sent にする
+-- （プロセスが落ちても「送ったのか分からない」行が残らない）。
+CREATE TABLE IF NOT EXISTS email_sends (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER REFERENCES email_campaigns(id) ON DELETE SET NULL,
+  company_id  INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  email       TEXT NOT NULL,
+  subject     TEXT NOT NULL,
+  body        TEXT NOT NULL,                  -- 実際に送ったテキスト本文
+  status      TEXT NOT NULL DEFAULT 'queued', -- queued/sent/failed/skipped
+  detail      TEXT,
+  message_id  TEXT,
+  -- この送信を指す不透明トークン。配信停止リンクの識別子。
+  token       TEXT NOT NULL UNIQUE,
+  sent_at     TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_email_sends_company ON email_sends(company_id);
+CREATE INDEX IF NOT EXISTS idx_email_sends_campaign ON email_sends(campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_email_sends_sent ON email_sends(status, sent_at);
+
+-- 本文に埋めた計測リンク。トークン → 実URL の対応をここに持つ。
+-- リダイレクト先をクエリ文字列から受け取るとオープンリダイレクトになるので、
+-- 必ずこの表を引いて既知の URL にだけ飛ばす。
+CREATE TABLE IF NOT EXISTS email_links (
+  token      TEXT PRIMARY KEY,
+  send_id    INTEGER NOT NULL REFERENCES email_sends(id) ON DELETE CASCADE,
+  url        TEXT NOT NULL,
+  label      TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_email_links_send ON email_links(send_id);
+
+-- クリック / 配信停止のイベント。1クリック1行（重複クリックも全部残す）。
+CREATE TABLE IF NOT EXISTS email_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  send_id    INTEGER NOT NULL REFERENCES email_sends(id) ON DELETE CASCADE,
+  company_id INTEGER,
+  kind       TEXT NOT NULL,                   -- click / unsubscribe
+  url        TEXT,
+  label      TEXT,
+  user_agent TEXT,
+  ts         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_email_events_send ON email_events(send_id, kind);
+CREATE INDEX IF NOT EXISTS idx_email_events_kind ON email_events(kind, ts);

@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "@types/nodemailer": "^8.0.1",
     "better-sqlite3": "^12.11.1",
     "cheerio": "^1.0.0",
     "commander": "^12.1.0",
@@ -31,6 +32,7 @@
     "express": "^5.2.1",
     "fast-xml-parser": "^4.5.1",
     "googleapis": "^173.0.0",
+    "nodemailer": "^9.0.5",
     "playwright": "^1.49.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
