@@ -56,19 +56,52 @@ const STRONG_SUCCESS_TEXT = [
  */
 const WEAK_SUCCESS_TEXT = ['ありがとうございました', 'ありがとうございます', 'thank you'];
 
+/**
+ * エラー文言。**単独の「必須」は入れない。**
+ *
+ * 日本のフォームは項目名の隣に「必須」バッジを常時出す作りがほとんどで、
+ * これをエラーの証拠にすると、正常に表示されているだけのフォームが
+ * 「バリデーションで弾かれた」と記録される。実際 SUBMITTED_FAILED 291 件を
+ * 開き直したところ、16 社中 15 社は必須欄がすべて埋まっており、
+ * 記録されていた「validation/error text present」は根拠になっていなかった。
+ * エラーだと言い切れる語形（「必須項目です」「必須です」）だけを見る。
+ */
 const ERROR_TEXT = [
-  '必須',
+  '必須項目',
+  '必須です',
+  'は必須',
+  '必須入力',
   '入力してください',
   '選択してください',
-  'エラー',
   '正しく入力',
   '未入力',
+  '入力に誤り',
+  '送信できませんでした',
+  '失敗しました',
+  'エラーが発生',
   'error',
   'required',
   'invalid',
-  '確認してください',
-  'もう一度',
 ];
+
+/**
+ * エラー表示に使われる要素。文字列一致より確実な証拠になる。
+ * 実際に画面に出ているものだけを数える（多くのフォームはエラー枠を
+ * 常時 DOM に置いて display:none で隠している）。
+ */
+const ERROR_SELECTORS = [
+  '.error:not(:empty)',
+  '.errors:not(:empty)',
+  '.is-error',
+  '.has-error',
+  '.invalid-feedback',
+  '.form-error',
+  '.wpcf7-not-valid-tip',
+  '.wpcf7-validation-errors',
+  '.mw_wp_form .error',
+  '[role=alert]:not(:empty)',
+  '[aria-invalid=true]',
+].join(',');
 
 /**
  * 確認画面の文言。ここで止まっている＝最後の「送信する」を押せていない。
@@ -124,6 +157,7 @@ export async function judgeResult(input: JudgeInput): Promise<Judgment> {
   let text = '';
   let formCount = 0;
   let filledCount = 0;
+  let errorEls = 0;
   try {
     afterUrl = page.url();
     text = await getVisibleText(page);
@@ -131,6 +165,16 @@ export async function judgeResult(input: JudgeInput): Promise<Judgment> {
     // 値の入ったテキストエリアが残っているか。残っていれば入力画面のまま。
     filledCount = await page
       .$$eval('textarea', (els) => els.filter((e) => (e as HTMLTextAreaElement).value.trim().length > 30).length)
+      .catch(() => 0);
+    // 実際に表示されているエラー要素の数。文言一致より確実な証拠。
+    errorEls = await page
+      .$$eval(ERROR_SELECTORS, (els) =>
+        els.filter((e) => {
+          const st = getComputedStyle(e as HTMLElement);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          return ((e as HTMLElement).innerText || '').trim().length > 0 || e.hasAttribute('aria-invalid');
+        }).length,
+      )
       .catch(() => 0);
   } catch (e) {
     return { status: 'needs_review', detail: `page read failed: ${(e as Error).message}` };
@@ -149,13 +193,14 @@ export async function judgeResult(input: JudgeInput): Promise<Judgment> {
   const successUrl = SUCCESS_URL.test(afterUrl);
   const strongSuccess = STRONG_SUCCESS_TEXT.some((t) => text.includes(t));
   const weakSuccess = WEAK_SUCCESS_TEXT.some((t) => text.includes(t));
-  const errorText = ERROR_TEXT.some((t) => text.includes(t));
+  // 表示されているエラー要素があれば、それだけで十分な証拠。文言一致は補助。
+  const errorText = errorEls > 0 || ERROR_TEXT.some((t) => text.includes(t));
   const confirmScreen =
     (CONFIRM_SCREEN_TEXT.some((t) => text.includes(t)) || CONFIRM_URL.test(afterUrl)) && !strongSuccess;
 
   const sig =
     `nav=${navigated} url=${successUrl} strong=${strongSuccess} weak=${weakSuccess} ` +
-    `err=${errorText} confirm=${confirmScreen} forms=${formCount} filled=${filledCount} bodyGone=${bodyGone}`;
+    `err=${errorText}(要素${errorEls}) confirm=${confirmScreen} forms=${formCount} filled=${filledCount} bodyGone=${bodyGone}`;
 
   // ---- 1. 入力画面のまま：まだ何も送れていない ------------------------------
   // 本文がページに残っている／値の入ったテキストエリアが残っているなら、

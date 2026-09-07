@@ -19,12 +19,18 @@ function fakePage(o: {
   text: string;
   forms?: number;
   filledTextareas?: number;
+  /** 画面に出ているエラー要素の数。 */
+  errorEls?: number;
 }): Page {
   return {
     url: () => o.url,
     evaluate: async () => o.text,
     locator: () => ({ count: async () => o.forms ?? 0 }),
-    $$eval: async () => o.filledTextareas ?? 0,
+    // judgeResult は textarea → エラー要素 の順に $$eval を呼ぶ。
+    $$eval: (() => {
+      let call = 0;
+      return async () => (call++ === 0 ? (o.filledTextareas ?? 0) : (o.errorEls ?? 0));
+    })(),
   } as unknown as Page;
 }
 
@@ -145,4 +151,37 @@ test('判定に使った画面テキストを証拠として返す（後から�
   });
   const j = await judgeResult({ page, beforeUrl: 'https://example.co.jp/contact/', captchaPresent: false });
   assert.ok(j.evidenceText && j.evidenceText.includes('送信完了'));
+});
+
+test('項目名の隣に出ている「必須」バッジをエラーと誤認しない', async () => {
+  // 日本のフォームはほぼ全て「お名前 必須」のように必須マークを常時表示する。
+  // これをエラーの証拠にしていたため、SUBMITTED_FAILED 291 件のうち多くは
+  // 実際には弾かれていないのに「バリデーションエラー」と記録されていた。
+  const page = fakePage({
+    url: 'https://example.co.jp/contact/thanks/',
+    text: 'お名前 必須 / メールアドレス 必須 / お問い合わせを受け付けました',
+    forms: 1,
+    filledTextareas: 0,
+    errorEls: 0,
+  });
+  const j = await judgeResult({
+    page,
+    beforeUrl: 'https://example.co.jp/contact/',
+    captchaPresent: false,
+    sentBody: BODY,
+  });
+  assert.equal(j.status, 'submitted_success');
+});
+
+test('画面に出ているエラー要素があれば、文言に関係なく失敗とする', async () => {
+  const page = fakePage({
+    url: 'https://example.co.jp/contact/',
+    text: 'お問い合わせ',
+    forms: 1,
+    filledTextareas: 0,
+    errorEls: 3,
+  });
+  const j = await judgeResult({ page, beforeUrl: 'https://example.co.jp/contact/', captchaPresent: false });
+  assert.equal(j.status, 'failed');
+  assert.match(j.detail, /要素3/);
 });
