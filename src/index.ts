@@ -9,6 +9,7 @@ import { discoverAndParse, buildPlan, runExecute, reparse } from './pipeline/pip
 import { listPending, approve, reject, suppressCompany } from './pipeline/approval.js';
 import { exportReport, exportSuppression } from './layers/l6_record.js';
 import { formatFunnel } from './pipeline/funnel.js';
+import { assignVariant, experimentWarnings, VARIANTS } from './pipeline/experiment.js';
 import { transition } from './core/stateMachine.js';
 import { nextSendDelayMs } from './crosscutting/pacing.js';
 import type { CompanyStatus, SuppressionReason } from './types.js';
@@ -282,6 +283,36 @@ program
       const res = await syncSheets();
       console.log(res.synced ? `Sheets: synced report=${res.reportRows} suppression=${res.suppressionRows}` : `Sheets: skipped (${res.reason})`);
     }
+  });
+
+program
+  .command('experiment')
+  .description('文面 A/B の状況 — 腕の定義と、対象企業がどう割り振られるか')
+  .option('--sample <n>', '割り当ての偏りを確認する件数', '2000')
+  .action((o: { sample: string }) => {
+    for (const w of experimentWarnings()) console.log(`⚠ ${w}`);
+    console.log('');
+    console.log('=== 文面パターン ===');
+    for (const v of VARIANTS) console.log(`  ${v.name.padEnd(10)} ${v.template.padEnd(18)} ${v.hypothesis}`);
+
+    // まだ送っていない企業が実際どう割り振られるかを見る。設計上は均等だが、
+    // 手元の ID 分布で偏らないことを送る前に確認できるようにしておく。
+    const pending = companies.byStatus('PENDING_APPROVAL', Number(o.sample));
+    const counts = new Map<string, number>();
+    for (const c of pending) {
+      const n = assignVariant(c.id).name;
+      counts.set(n, (counts.get(n) ?? 0) + 1);
+    }
+    console.log('');
+    console.log(`=== 承認待ち ${pending.length} 社の割り当て ===`);
+    for (const v of VARIANTS) {
+      const n = counts.get(v.name) ?? 0;
+      const pct = pending.length ? ((n / pending.length) * 100).toFixed(1) : '0.0';
+      console.log(`  ${v.name.padEnd(10)} ${String(n).padStart(5)} 社  ${pct}%`);
+    }
+    console.log('');
+    console.log('結果は `toiawase funnel` の「文面パターン別」で比較できます。');
+    console.log('返信・アポを `toiawase outcome <企業ID> reply|appointment` で記録しないと差は出ません。');
   });
 
 program

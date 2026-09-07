@@ -4,6 +4,7 @@ import { transition } from '../core/stateMachine.js';
 import { discoverForm } from '../layers/l1_discovery.js';
 import { parseForm } from '../layers/l2_parsing.js';
 import { renderContent } from '../layers/l3_content.js';
+import { assignVariant, variantByName } from './experiment.js';
 import { computeCoverage } from '../layers/coverage.js';
 import { classifyEligibility } from '../crosscutting/eligibility.js';
 import { planSubmission, executeSubmission } from '../layers/l4_submit.js';
@@ -185,14 +186,20 @@ export async function buildPlan(companyId: number, opts: BuildPlanOptions = {}):
   }
 
   transition(company.id, 'PLAN_READY');
-  const content = renderContent(company, schema, { templateName: opts.templateName });
+  // 文面パターンは企業 ID から決まる。プランで見た文面と実際に送る文面が
+  // 食い違わないよう、割り当てを submissions に書き残して送信時に読み直す。
+  const variant = assignVariant(company.id);
+  const content = renderContent(company, schema, {
+    templateName: opts.templateName ?? variant.template,
+  });
   const plan = await planSubmission(company, schema, content);
 
-  submissions.createPlan({
+  const submissionId = submissions.createPlan({
     companyId: company.id,
     contentRendered: content.body,
     planScreenshotUrl: plan.screenshotPath,
   });
+  submissions.setVariant(submissionId, opts.templateName ? `manual:${opts.templateName}` : variant.name);
   audit.log({
     companyId: company.id,
     layer: 'L4',
@@ -239,7 +246,14 @@ export async function runExecute(companyId: number): Promise<void> {
   }
 
   const schema = fieldMaps.latest(company.id)!;
-  const content = renderContent(company, schema);
+  // プラン時に決めた文面パターンをそのまま使う。ここで引き直さないと、
+  // 承認画面で見た文面と実際に送る文面が別物になる（既定テンプレートに
+  // 戻ってしまう）。プレビュー == 送信内容 はこの仕組みの前提なので、
+  // 実験を入れるなら真っ先に守らなければならない。
+  const planned = submissions.latestForCompany(company.id);
+  const content = renderContent(company, schema, {
+    templateName: variantByName(planned?.variant).template,
+  });
 
   // 送信内容の最終検証（誤送信ガード）。フォーム側のゲートを全部通っても、
   // 入れる値そのものが壊れていれば送ってはいけない — 氏名・電話番号が設定と
