@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ruleMap } from '../src/layers/l2_parsing.js';
 import { computeCoverage } from '../src/layers/coverage.js';
 import { shouldFillField } from '../src/layers/fillPolicy.js';
+import { classifyEligibility } from '../src/crosscutting/eligibility.js';
 import type { CompanyRow, DetectedField, FormSchema } from '../src/types.js';
 
 /**
@@ -122,4 +123,60 @@ test('本当に埋められない必須欄は今も除外の根拠になる', ()
     f({ labelText: 'お問い合わせ内容', tag: 'textarea', type: 'textarea', required: true }),
   ];
   assert.deepEqual(missingLabels(fields), ['生年月日']);
+});
+
+/* --------------------- 本文欄の入力先が「無い」判定 --------------------- */
+
+test('見出しの取れない textarea も本文欄として扱う', () => {
+  // 見出しが無く name しか分からないフォームは珍しくない
+  // （content / contents / remarks / bikou / itext など）。語形で判断すると
+  // 「役割に合わない」とされ、本文の入力先が無い＝連絡手段が無いとして
+  // 企業ごと除外されていた（not_contactable 317 社のうち 75 社）。
+  for (const name of ['content', 'contents', 'remarks', 'bikou', 'itext', 'v8']) {
+    const fields = [
+      f({ labelText: 'お名前', required: true }),
+      f({ name, tag: 'textarea', type: 'textarea', required: true }),
+    ];
+    const cov = computeCoverage(company, schemaOf(fields));
+    const msg = cov.fields.find((x: { role: string | null }) => x.role === 'message');
+    assert.ok(msg, `name=${name} が本文欄に対応付いていない`);
+    assert.equal(msg!.status, 'ok', `name=${name} が「役割に合わない」と判定されている`);
+  }
+});
+
+test('本文欄がまったく無いフォームは今も除外する', () => {
+  const fields = [f({ labelText: 'お名前', required: true }), f({ labelText: 'メールアドレス', required: true })];
+  const cov = computeCoverage(company, schemaOf(fields));
+  assert.equal(
+    cov.fields.some((x: { role: string | null }) => x.role === 'message'),
+    false,
+  );
+});
+
+/* ------------------------ 消費者向けフォームの判定 ------------------------ */
+
+test('会社見学・工場見学は B2B の問い合わせ種別であって消費者向けの証拠ではない', () => {
+  // メーカーやオフィス家具の法人向けフォームに選択肢として並んでいるだけ。
+  for (const label of ['会社見学について', '工場見学', 'ショールーム見学', '職場見学']) {
+    const fields = [
+      f({ labelText: label, tag: 'input', type: 'checkbox' }),
+      f({ labelText: 'お問い合わせ内容', tag: 'textarea', type: 'textarea', required: true }),
+      f({ labelText: 'お名前', required: true }),
+      f({ labelText: 'メールアドレス', required: true }),
+      f({ labelText: '会社名', required: true }),
+    ];
+    const v = classifyEligibility(schemaOf(fields), computeCoverage(company, schemaOf(fields)));
+    assert.notEqual(v.reason, 'consumer_form', `${label} が消費者向けと判定されている`);
+  }
+});
+
+test('本当に消費者向けのフォームは今も除外する', () => {
+  for (const label of ['要介護度', 'ご利用者様との続柄', '施設見学のご希望日', 'お子様の生年月日']) {
+    const fields = [
+      f({ labelText: label, required: true }),
+      f({ labelText: 'お問い合わせ内容', tag: 'textarea', type: 'textarea', required: true }),
+    ];
+    const v = classifyEligibility(schemaOf(fields), computeCoverage(company, schemaOf(fields)));
+    assert.equal(v.reason, 'consumer_form', `${label} が消費者向けと判定されていない`);
+  }
 });

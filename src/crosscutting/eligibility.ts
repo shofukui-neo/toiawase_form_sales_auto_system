@@ -40,8 +40,21 @@ export interface Eligibility {
 const CONSUMER_RE =
   /要介護|要支援|介護度|介護認定|ケアプラン|ご利用者|利用者様|被保険者|相談者|続柄|ご家族|保護者|生年月日|性別|見学|来場|来店|体験|入居|入園|入学|診察|受診|予約日|希望日|お子様|園児|里帰り/;
 
+/**
+ * 「見学」は B2B の問い合わせ種別としても普通に並ぶ。
+ * 会社見学・工場見学・ショールーム見学・職場見学は、メーカーやオフィス家具の
+ * 法人向けフォームで選択肢の一つとして置かれているだけで、消費者向けの
+ * 証拠にはならない。実際 HILLTOP（工場見学）、アイリスチトセ（ショールーム
+ * 見学）、すててこ（会社見学）がこれで除外されていた。
+ * 判定前にこれらの語を落としてから消費者向けの語を探す。
+ */
+const B2B_VISIT_RE = /(会社|工場|職場|ショールーム|オフィス|事業所|拠点|showroom)見学/g;
+
 function labelHay(f: DetectedField): string {
-  return [f.labelText, f.placeholder, f.name, f.id].filter(Boolean).join(' ');
+  return [f.labelText, f.placeholder, f.name, f.id]
+    .filter(Boolean)
+    .join(' ')
+    .replace(B2B_VISIT_RE, '');
 }
 
 /**

@@ -70,7 +70,7 @@ const ROLE_LABEL_HINTS: Partial<Record<FieldRole, RegExp>> = {
   address: /住所|所在地|address|addr|都道府県|市区町村|番地|ビル|建物|マンション|丁目|pref|city|street/i,
   department: /部署|部門|役職|所属|department|division|position/i,
   subject: /件名|題名|タイトル|用件|subject|title/i,
-  message: /内容|本文|お問い?合わせ|問合|ご相談|相談|メッセージ|備考|詳細|質問|ご要望|message|comment|body|inquiry|question|quest|honbun/i,
+  message: /内容|本文|お問い?合わせ|問合|ご相談|相談|メッセージ|備考|詳細|質問|ご要望|message|comment|body|inquiry|question|quest|honbun|content|remark|bikou|free.?text/i,
 };
 
 function baseRole(role: FieldRole): FieldRole {
@@ -128,6 +128,13 @@ function fieldMatchesRole(field: DetectedField, role: FieldRole): boolean {
   const t = (field.type || '').toLowerCase();
   if (base === 'email' && t === 'email') return true;
   if (base === 'phone' && t === 'tel') return true;
+  // textarea は自由記述の本文欄そのもの。見出しが取れず name しか分からない
+  // フォームは珍しくなく（content / contents / remarks / bikou / itext など）、
+  // 語形で見ると「役割に合わない」と判定されてしまう。すると本文の入力先が
+  // 無いとみなされ、「連絡手段が無い」として企業ごと除外されていた
+  // （not_contactable 317 社のうち 75 社がこれ）。実際には L4 はこの欄に
+  // 本文を入力する。要素の種類で判断するほうが確実。
+  if (base === 'message' && field.tag === 'textarea') return true;
   const hint = ROLE_LABEL_HINTS[base];
   if (!hint) return true; // choice/agree/unknown — never flagged
   return hint.test(fieldHay(field));
