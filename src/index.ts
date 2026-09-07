@@ -10,6 +10,7 @@ import { listPending, approve, reject, suppressCompany } from './pipeline/approv
 import { exportReport, exportSuppression } from './layers/l6_record.js';
 import { formatFunnel } from './pipeline/funnel.js';
 import { assignVariant, experimentWarnings, VARIANTS } from './pipeline/experiment.js';
+import { importReplies } from './pipeline/replyImport.js';
 import { transition } from './core/stateMachine.js';
 import { nextSendDelayMs } from './crosscutting/pacing.js';
 import type { CompanyStatus, SuppressionReason } from './types.js';
@@ -282,6 +283,27 @@ program
       const { syncSheets } = await import('./layers/l6_sheets.js');
       const res = await syncSheets();
       console.log(res.synced ? `Sheets: synced report=${res.reportRows} suppression=${res.suppressionRows}` : `Sheets: skipped (${res.reason})`);
+    }
+  });
+
+program
+  .command('import-replies')
+  .description('受信メールから返信・アポを取り込む（自動返信は除外）')
+  .argument('<path>', '.eml を置いたディレクトリ、単一の .eml、または CSV(from,subject,date,body)')
+  .option('--apply', '実際に記録する（既定は確認のみ）', false)
+  .action((path: string, o: { apply: boolean }) => {
+    const r = importReplies(path, { apply: o.apply });
+    for (const line of r.lines) console.log(line);
+    console.log('');
+    console.log(`=== ${r.total} 通 ===`);
+    for (const [k, n] of Object.entries(r.byKind)) console.log(`  ${k.padEnd(12)} ${n}`);
+    console.log(`自動返信として除外: ${r.autoReplies}`);
+    console.log(`企業を特定できず  : ${r.unmatched}`);
+    if (o.apply) {
+      console.log(`記録した反応      : ${r.recorded}`);
+      console.log('`toiawase funnel` で文面パターン別の返信率・アポ率を確認できます。');
+    } else {
+      console.log('確認のみ（記録していません）。--apply を付けると記録します。');
     }
   });
 
