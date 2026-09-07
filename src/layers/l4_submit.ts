@@ -4,7 +4,7 @@ import type { Page } from 'playwright';
 import type { CompanyRow, FormSchema, RenderedContent, FieldRole, DetectedField } from '../types.js';
 import { config } from '../config.js';
 import { BrowserSession, withBrowserSlot } from '../browser/browser.js';
-import { extractButtons } from '../browser/extract.js';
+import { extractButtons, type ButtonInfo } from '../browser/extract.js';
 import { judgeResult, type Judgment } from './l5_result.js';
 import { shouldFillField, resolveFieldValue } from './fillPolicy.js';
 import { logger } from '../utils/logger.js';
@@ -335,7 +335,7 @@ async function planSubmissionInSlot(
     await fillForm(session, page, schema, content);
 
     const buttons = await extractButtons(page);
-    const confirmBtn = buttons.find((b) => b.kind === 'confirm');
+    const confirmBtn = pickButton(buttons, 'confirm');
 
     let reachedConfirmScreen = false;
     let strategy: PlanResult['strategy'] = 'filled-only';
@@ -383,6 +383,28 @@ async function captureResult(page: Page, companyId: number, tag: string): Promis
   }
 }
 
+/**
+ * 押してよいボタンを選ぶ。
+ *
+ * 旧実装の最終手段は「戻る/修正 以外の最初のボタン」だった。これはページ上の
+ * どのボタンでも該当してしまい、実際にはハンバーガーメニューや Google 翻訳
+ * ウィジェットを押しに行っていた（`needs_review` 241 件の click タイムアウト）。
+ * 見えないボタン・フォームの外のボタンは、どれだけ他に候補が無くても押さない。
+ * 押せる候補が無いなら「無い」と報告するほうが、無関係な要素を押して 20 秒
+ * 待たされたうえで失敗するより速く、原因も残る。
+ */
+function pickButton(buttons: ButtonInfo[], kind: 'confirm' | 'submit'): ButtonInfo | undefined {
+  // 見えていないものと、押すと入力が消えるもの（戻る/修正/リセット）を先に落とす。
+  // 非表示要素の click は actionability 待ちで必ず 20 秒溶かすし、「修正する」を
+  // 押せば入力が失われたうえで送信済みに見える画面になりかねない。
+  const clickable = buttons.filter((b) => b.visible && !b.inChrome && !b.negative);
+  const named = clickable.find((b) => b.kind === kind && b.inForm) ?? clickable.find((b) => b.kind === kind);
+  if (named || kind === 'confirm') return named;
+  // 確認画面には「送信」と書かれていないボタン（例: 「この内容でよろしければ」）
+  // しか無いことがある。ただしフォームの内側にあるものに限る。
+  return clickable.find((b) => b.kind === 'other' && b.inForm);
+}
+
 export interface ExecuteResult {
   judgment: Judgment;
   finalUrl: string;
@@ -423,27 +445,36 @@ async function executeSubmissionInSlot(
     await fillForm(session, page, schema, content);
 
     let buttons = await extractButtons(page);
-    const confirmBtn = buttons.find((b) => b.kind === 'confirm');
+    const confirmBtn = pickButton(buttons, 'confirm');
 
     if (confirmBtn) {
       await Promise.all([
         page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {}),
-        page.locator(confirmBtn.selector).first().click(),
+        // タイムアウトを 20 秒から 8 秒へ。押せない要素を選んでしまった場合に
+        // 20 秒待つ意味は無く、その間ブラウザ枠を占有して 1 日の送信数を削る。
+        page.locator(confirmBtn.selector).first().click({ timeout: 8000 }),
       ]);
       await session.humanDelay(600, 1400);
       // On the confirm screen, find the final submit button.
       buttons = await extractButtons(page);
     }
 
-    const submitBtn =
-      buttons.find((b) => b.kind === 'submit') ??
-      // last resort on confirm screen: a lone button that's not "戻る/修正"
-      buttons.find((b) => b.kind === 'other' && !/戻|修正|back|edit/i.test(b.text));
+    const submitBtn = pickButton(buttons, 'submit');
 
     if (!submitBtn) {
       const shot = await captureResult(page, company.id, 'nosubmit');
+      // どのボタンが候補にすら挙がらなかったのかを残す。これが無いと、
+      // フォームが iframe の中にあるのか、画像ボタンなのか、単に文言が
+      // 想定外なのかを後から切り分けられない。
+      const seen = buttons
+        .slice(0, 6)
+        .map((b) => `${b.text.slice(0, 12) || '(無題)'}[${b.kind}${b.visible ? '' : ',不可視'}${b.inForm ? '' : ',フォーム外'}]`)
+        .join(' / ');
       return {
-        judgment: { status: 'needs_review', detail: 'no submit button found after fill/confirm' },
+        judgment: {
+          status: 'needs_review',
+          detail: `送信ボタンを特定できず（候補 ${buttons.length} 件: ${seen || 'なし'}）`,
+        },
         finalUrl: page.url(),
         resultScreenshotUrl: shot,
       };
@@ -451,7 +482,7 @@ async function executeSubmissionInSlot(
 
     await Promise.all([
       page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {}),
-      page.locator(submitBtn.selector).first().click(),
+      page.locator(submitBtn.selector).first().click({ timeout: 8000 }),
     ]);
     await session.humanDelay(800, 1800);
 

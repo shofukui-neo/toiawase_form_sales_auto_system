@@ -12,6 +12,17 @@ export interface ButtonInfo {
   /** 'confirm' = goes to a confirmation screen (safe to click in Plan);
    *  'submit'  = final send (must NOT be clicked in Plan on a 1-step form). */
   kind: 'confirm' | 'submit' | 'other';
+  /** 画面に見えているか。見えないボタンを click すると 20 秒待って落ちる。 */
+  visible: boolean;
+  /** フォーム要素の内側にあるか。外にあるボタンは送信ボタンではない。 */
+  inForm: boolean;
+  /** header / nav / footer など、ページ共通部品の中にあるか。 */
+  inChrome: boolean;
+  /**
+   * 「戻る」「修正」「リセット」など、押すと入力が消える／別画面へ行くボタン。
+   * kind が 'other' に落ちるだけだと、最終手段の絞り込みで拾われてしまう。
+   */
+  negative: boolean;
 }
 
 /** Extract every fillable field with honeypot + label + required signals. */
@@ -182,6 +193,23 @@ export async function extractFields(page: Page): Promise<DetectedField[]> {
 }
 
 /** Classify submit/confirm buttons (spec §4-L4 button classification). */
+/**
+ * 押せる可能性のあるボタンを、送信ボタンらしい順に返す。
+ *
+ * **なぜ順序と可視性が要るか。** 旧実装は `document.querySelectorAll` で
+ * ページ全体のボタンを可視性も無視して集め、呼び出し側が「戻る/修正 以外の
+ * 最初の 1 つ」を押していた。その結果、実際に押しに行っていたのは
+ *   `#cboxPrevious`      … Colorbox ライトボックスの「前へ」
+ *   `body > header > button` … ハンバーガーメニュー
+ *   `#goog-gt-thumbUpButton` … Google 翻訳ウィジェットの高評価ボタン
+ * といった、フォームと無関係な非表示要素だった。非表示要素の click は
+ * actionability を 20 秒待ってからタイムアウトするので、送信は毎回失敗する。
+ * 実際 `needs_review` 514 件のうち 241 件（46.9%）がこのタイムアウトである。
+ *
+ * そこで「見えているか」「フォームの内側か」「ページ共通部品の中か」を
+ * 一緒に返し、送信ボタンらしい順に並べて返す。判断材料を呼び出し側へ渡さずに
+ * DOM 順の先頭を押すという設計自体が誤りだった。
+ */
 export async function extractButtons(page: Page): Promise<ButtonInfo[]> {
   return page.evaluate(() => {
     function cssPath(el: Element): string {
@@ -201,13 +229,44 @@ export async function extractButtons(page: Page): Promise<ButtonInfo[]> {
       }
       return parts.join(' > ');
     }
+
     const CONFIRM = ['確認', 'かくにん', '内容確認', '確認画面', 'confirm', '次へ', '進む'];
-    const SUBMIT = ['送信', 'そうしん', '送 信', 'submit', '送信する', '申し込', '送信内容', 'send', '送る'];
+    const SUBMIT = [
+      '送信', 'そうしん', '送 信', 'submit', '送信する', '申し込', '申込', '送信内容',
+      'send', '送る', 'この内容で', '同意して送信',
+    ];
+    /** 明らかに送信ではないボタン。押すと入力が消えたり別画面へ飛ぶ。 */
+    const NEGATIVE = [
+      'リセット', 'クリア', 'reset', 'clear', '戻る', '修正', 'back', 'キャンセル', 'cancel',
+      '閉じる', 'close', '検索', 'search', 'メニュー', 'menu', 'ログイン', 'login',
+      '前へ', 'previous', '次の', '翻訳', 'translate',
+    ];
+
+    /** 画面に見えているか。display:none / 幅ゼロ / 透明はすべて押せない。 */
+    function isVisible(el: HTMLElement): boolean {
+      const st = getComputedStyle(el);
+      if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return false;
+      // 祖先が畳まれている場合（モバイルメニュー等）も押せない。
+      let node: HTMLElement | null = el.parentElement;
+      while (node) {
+        const ps = getComputedStyle(node);
+        if (ps.display === 'none' || ps.visibility === 'hidden') return false;
+        node = node.parentElement;
+      }
+      return true;
+    }
+
     const els = Array.from(
-      document.querySelectorAll('button, input[type=submit], input[type=button], input[type=image], a[role=button]'),
+      document.querySelectorAll(
+        'button, input[type=submit], input[type=button], input[type=image], a[role=button]',
+      ),
     ) as HTMLElement[];
-    const out: any[] = [];
+
+    const out: ButtonInfoLocal[] = [];
     for (const el of els) {
+      if ((el as HTMLButtonElement).disabled) continue;
       const text = (
         el.textContent ||
         el.getAttribute('value') ||
@@ -216,12 +275,52 @@ export async function extractButtons(page: Page): Promise<ButtonInfo[]> {
         ''
       ).trim();
       const low = text.toLowerCase();
+
+      const negative = NEGATIVE.some((k) => text.includes(k) || low.includes(k));
       let kind: 'confirm' | 'submit' | 'other' = 'other';
-      if (CONFIRM.some((k) => text.includes(k) || low.includes(k))) kind = 'confirm';
-      else if (SUBMIT.some((k) => text.includes(k) || low.includes(k))) kind = 'submit';
-      out.push({ selector: cssPath(el), text, kind });
+      // 否定語を先に見る。「送信前に戻る」のような文言を submit にしない。
+      if (!negative) {
+        if (CONFIRM.some((k) => text.includes(k) || low.includes(k))) kind = 'confirm';
+        else if (SUBMIT.some((k) => text.includes(k) || low.includes(k))) kind = 'submit';
+      }
+
+      out.push({
+        selector: cssPath(el),
+        text,
+        kind,
+        negative,
+        visible: isVisible(el),
+        inForm: !!el.closest('form'),
+        inChrome: !!el.closest('header, nav, footer, aside, [role=navigation], [role=banner]'),
+      });
     }
+
+    // 送信ボタンらしい順に並べる。呼び出し側は先頭から試せばよい。
+    // ここを const のアロー関数で書くと、tsx (esbuild keepNames) が `__name`
+    // 呼び出しを差し込み、ブラウザ側に定義が無いため実行時に落ちる。
+    // page.evaluate に渡す関数の中では function 宣言を使うこと。
+    function score(b: ButtonInfoLocal): number {
+      return (
+        (b.visible ? 8 : 0) +
+        (b.inForm ? 4 : 0) +
+        (b.inChrome ? -6 : 0) +
+        (b.negative ? -10 : 0) +
+        (b.kind !== 'other' ? 2 : 0)
+      );
+    }
+    out.sort((a, b) => score(b) - score(a));
     return out as any;
+
+    // page.evaluate の中では外側の型を参照できないため、同じ形をローカルに置く。
+    type ButtonInfoLocal = {
+      selector: string;
+      text: string;
+      kind: 'confirm' | 'submit' | 'other';
+      negative: boolean;
+      visible: boolean;
+      inForm: boolean;
+      inChrome: boolean;
+    };
   }) as Promise<ButtonInfo[]>;
 }
 
