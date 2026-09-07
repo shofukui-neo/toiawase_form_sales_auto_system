@@ -23,6 +23,14 @@ export interface ButtonInfo {
    * kind が 'other' に落ちるだけだと、最終手段の絞り込みで拾われてしまう。
    */
   negative: boolean;
+  /**
+   * disabled のボタン。**候補から消さずに残す。**
+   * 日本企業のフォームでは「個人情報の取扱いに同意する」にチェックを入れるまで
+   * 送信ボタンが disabled のままという作りが多い。ここで捨ててしまうと
+   * 「送信ボタンが存在しない」と報告することになり、実際の原因
+   * （同意チェックが入っていない）に辿り着けない。
+   */
+  disabled: boolean;
 }
 
 /** Extract every fillable field with honeypot + label + required signals. */
@@ -266,7 +274,6 @@ export async function extractButtons(page: Page): Promise<ButtonInfo[]> {
 
     const out: ButtonInfoLocal[] = [];
     for (const el of els) {
-      if ((el as HTMLButtonElement).disabled) continue;
       const text = (
         el.textContent ||
         el.getAttribute('value') ||
@@ -289,6 +296,7 @@ export async function extractButtons(page: Page): Promise<ButtonInfo[]> {
         text,
         kind,
         negative,
+        disabled: !!(el as HTMLButtonElement).disabled,
         visible: isVisible(el),
         inForm: !!el.closest('form'),
         inChrome: !!el.closest('header, nav, footer, aside, [role=navigation], [role=banner]'),
@@ -305,6 +313,7 @@ export async function extractButtons(page: Page): Promise<ButtonInfo[]> {
         (b.inForm ? 4 : 0) +
         (b.inChrome ? -6 : 0) +
         (b.negative ? -10 : 0) +
+        (b.disabled ? -5 : 0) +
         (b.kind !== 'other' ? 2 : 0)
       );
     }
@@ -317,6 +326,7 @@ export async function extractButtons(page: Page): Promise<ButtonInfo[]> {
       text: string;
       kind: 'confirm' | 'submit' | 'other';
       negative: boolean;
+      disabled: boolean;
       visible: boolean;
       inForm: boolean;
       inChrome: boolean;

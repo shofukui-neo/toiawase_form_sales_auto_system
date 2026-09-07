@@ -105,12 +105,18 @@ function reservedSelectors(schema: FormSchema, own: string): string[] {
 }
 
 /** Fill every mapped, non-honeypot field. Shared by Plan and Execute so text is identical. */
-async function fillForm(
+/** どの役割の欄が実際に埋まったか。送信可否の判断に使う。 */
+export interface FillReport {
+  failed: FieldRole[];
+}
+
+export async function fillForm(
   session: BrowserSession,
   page: Page,
   schema: FormSchema,
   content: RenderedContent,
-): Promise<void> {
+): Promise<FillReport> {
+  const failed: FieldRole[] = [];
   for (const role of TEXT_ROLES) {
     const mapping = schema.mappings.find((m) => m.role === role);
     if (!mapping) continue;
@@ -143,6 +149,10 @@ async function fillForm(
       }
       await session.humanDelay(120, 400);
     } catch (e) {
+      // 失敗した欄を必ず持ち帰る。ここで握りつぶすと、本文が空のまま送信ボタンを
+      // 押してしまい、相手には氏名とメールだけの空の問い合わせが届く。しかも
+      // 完了ページには遷移するので L5 は「成功」と記録する。
+      failed.push(role);
       log.warn(`fill failed role=${role} selector=${mapping.selector}: ${(e as Error).message}`);
     }
   }
@@ -202,6 +212,45 @@ async function fillForm(
       }
     }
   }
+
+  return { failed };
+}
+
+/**
+ * 送信前に、本文が本当にフォームへ入っているかを DOM から読み戻して確かめる。
+ *
+ * 例外が出なかったことは「入った」ことを意味しない。入力途中でフォームが
+ * 再描画されればロケータは剥がれ、ブラウザが落ちれば途中までしか入らない。
+ * それでも送信ボタンは押せてしまい、相手には氏名とメールだけの空の問い合わせが
+ * 届く。完了ページには遷移するので L5 は「成功」と記録し、返信が来ないまま
+ * 「アポ率 0%」として数えられる。**送る前にこちらから確認する。**
+ */
+export async function verifyBodyLanded(
+  page: Page,
+  schema: FormSchema,
+  content: RenderedContent,
+): Promise<{ ok: boolean; detail: string }> {
+  const mapping = schema.mappings.find((m) => m.role === 'message');
+  if (!mapping) return { ok: true, detail: 'message欄なし' };
+
+  const actual = await page
+    .locator(mapping.selector)
+    .first()
+    .inputValue({ timeout: 5000 })
+    .catch(() => '');
+
+  const flat = (t: string) => t.replace(/[\s　]+/g, '');
+  const want = flat(content.body);
+  const got = flat(actual);
+  if (!got) return { ok: false, detail: '本文欄が空のまま' };
+
+  // maxlength で切り詰められる分は許容する（L3 が事前に縮めているが、
+  // フォーム側の実装差で数文字ずれることがある）。欠けが大きいものだけ止める。
+  const ratio = got.length / Math.max(want.length, 1);
+  if (ratio < 0.9) {
+    return { ok: false, detail: `本文が途中までしか入っていない (${got.length}/${want.length}字)` };
+  }
+  return { ok: true, detail: `本文 ${got.length}字` };
 }
 
 /** A dropdown's default "please choose" style option (must be changed to validate). */
@@ -393,11 +442,11 @@ async function captureResult(page: Page, companyId: number, tag: string): Promis
  * 押せる候補が無いなら「無い」と報告するほうが、無関係な要素を押して 20 秒
  * 待たされたうえで失敗するより速く、原因も残る。
  */
-function pickButton(buttons: ButtonInfo[], kind: 'confirm' | 'submit'): ButtonInfo | undefined {
+export function pickButton(buttons: ButtonInfo[], kind: 'confirm' | 'submit'): ButtonInfo | undefined {
   // 見えていないものと、押すと入力が消えるもの（戻る/修正/リセット）を先に落とす。
   // 非表示要素の click は actionability 待ちで必ず 20 秒溶かすし、「修正する」を
   // 押せば入力が失われたうえで送信済みに見える画面になりかねない。
-  const clickable = buttons.filter((b) => b.visible && !b.inChrome && !b.negative);
+  const clickable = buttons.filter((b) => b.visible && !b.inChrome && !b.negative && !b.disabled);
   const named = clickable.find((b) => b.kind === kind && b.inForm) ?? clickable.find((b) => b.kind === kind);
   if (named || kind === 'confirm') return named;
   // 確認画面には「送信」と書かれていないボタン（例: 「この内容でよろしければ」）
@@ -442,7 +491,23 @@ async function executeSubmissionInSlot(
     const page = await session.open();
     await page.goto(schema.formUrl, { waitUntil: 'domcontentloaded' });
     const beforeUrl = page.url();
-    await fillForm(session, page, schema, content);
+    const fill = await fillForm(session, page, schema, content);
+
+    // 本文が入っていないなら送らない。空の問い合わせを送るくらいなら
+    // 送らずに人へ回すほうがよい。相手に一度でも空文を送れば、その企業は
+    // 二度と使えなくなる（抑制リストに載り、印象も最悪になる）。
+    const bodyCheck = await verifyBodyLanded(page, schema, content);
+    if (!bodyCheck.ok || fill.failed.includes('message')) {
+      const shot = await captureResult(page, company.id, 'nobody');
+      return {
+        judgment: {
+          status: 'needs_review',
+          detail: `送信中止: ${bodyCheck.detail}${fill.failed.length ? ` / 入力失敗=${fill.failed.join(',')}` : ''}`,
+        },
+        finalUrl: page.url(),
+        resultScreenshotUrl: shot,
+      };
+    }
 
     let buttons = await extractButtons(page);
     const confirmBtn = pickButton(buttons, 'confirm');
@@ -468,12 +533,23 @@ async function executeSubmissionInSlot(
       // 想定外なのかを後から切り分けられない。
       const seen = buttons
         .slice(0, 6)
-        .map((b) => `${b.text.slice(0, 12) || '(無題)'}[${b.kind}${b.visible ? '' : ',不可視'}${b.inForm ? '' : ',フォーム外'}]`)
+        .map(
+          (b) =>
+            `${b.text.slice(0, 12) || '(無題)'}[${b.kind}${b.visible ? '' : ',不可視'}` +
+            `${b.disabled ? ',無効' : ''}${b.inForm ? '' : ',フォーム外'}]`,
+        )
         .join(' / ');
+      // 送信ボタンが disabled のまま残っているなら、ボタンが無いのではなく
+      // 「同意チェックが入っていない」possibility が高い。原因が違えば直し方も
+      // 違うので、同じ needs_review でも区別できる文言にする。
+      const blockedByConsent = buttons.some((b) => b.disabled && b.visible && !b.negative);
+      const reason = blockedByConsent
+        ? '送信ボタンが無効のまま（同意チェック未完了の可能性）'
+        : '送信ボタンを特定できず';
       return {
         judgment: {
           status: 'needs_review',
-          detail: `送信ボタンを特定できず（候補 ${buttons.length} 件: ${seen || 'なし'}）`,
+          detail: `${reason}（候補 ${buttons.length} 件: ${seen || 'なし'}）`,
         },
         finalUrl: page.url(),
         resultScreenshotUrl: shot,

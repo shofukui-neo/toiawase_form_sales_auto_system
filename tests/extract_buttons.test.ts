@@ -62,7 +62,7 @@ async function buttonsOf(html: string): Promise<ButtonInfo[]> {
 
 /** 本番コードと同じ選び方（l4_submit.pickButton と同じ規則）。 */
 function pick(buttons: ButtonInfo[], kind: 'confirm' | 'submit'): ButtonInfo | undefined {
-  const clickable = buttons.filter((b) => b.visible && !b.inChrome && !b.negative);
+  const clickable = buttons.filter((b) => b.visible && !b.inChrome && !b.negative && !b.disabled);
   const named = clickable.find((b) => b.kind === kind && b.inForm) ?? clickable.find((b) => b.kind === kind);
   if (named || kind === 'confirm') return named;
   return clickable.find((b) => b.kind === 'other' && b.inForm);
@@ -131,4 +131,44 @@ test('押せるボタンが一つも無ければ、無いと答える（無関�
 test('送信ボタンらしい順に並んでいる（呼び出し側は先頭から試せる）', async () => {
   const buttons = await buttonsOf(PAGE);
   assert.equal(buttons[0].selector, '#real-submit');
+});
+
+test('同意チェック待ちで disabled のボタンは、候補から消さずに無効と印を付ける', async () => {
+  // 日本企業のフォームに多い作り: 個人情報の同意にチェックが入るまで
+  // 送信ボタンが disabled のまま。これを候補から消してしまうと
+  // 「送信ボタンが存在しない」と報告され、実際の原因に辿り着けない。
+  const html = `<form>
+    <textarea name="message"></textarea>
+    <label><input type="checkbox" name="agree"> 個人情報の取扱いに同意する</label>
+    <button id="confirm-btn" disabled>確認画面へ</button>
+  </form>`;
+  const buttons = await buttonsOf(html);
+  const btn = buttons.find((b) => b.selector === '#confirm-btn');
+  assert.ok(btn, '無効なボタンが候補から消えている');
+  assert.equal(btn!.disabled, true);
+  assert.equal(btn!.visible, true, '無効でも画面には見えている');
+  assert.equal(btn!.kind, 'confirm');
+  // 押しはしない（押しても何も起きずタイムアウトするだけ）。
+  assert.equal(pick(buttons, 'confirm'), undefined);
+});
+
+test('同意チェックを入れれば、同じボタンが押せる候補になる', async () => {
+  const html = `<form>
+    <label><input type="checkbox" id="agree"> 同意する</label>
+    <button id="confirm-btn" disabled>確認画面へ</button>
+    <script>document.getElementById('agree').addEventListener('change', function(){
+      document.getElementById('confirm-btn').disabled = !this.checked;
+    });</script>
+  </form>`;
+  const session = new BrowserSession({ seed: 9 });
+  try {
+    const page = await session.open();
+    await page.setContent(`<!doctype html><html><body>${html}</body></html>`);
+    assert.equal(pick(await extractButtons(page), 'confirm'), undefined, '未チェックでは押せないはず');
+    await page.locator('#agree').check();
+    const chosen = pick(await extractButtons(page), 'confirm');
+    assert.equal(chosen?.selector, '#confirm-btn');
+  } finally {
+    await session.close();
+  }
 });
