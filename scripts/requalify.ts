@@ -17,7 +17,7 @@
 import { companies, fieldMaps, suppression } from '../src/db/repositories.js';
 import { computeCoverage } from '../src/layers/coverage.js';
 import { classifyEligibility } from '../src/crosscutting/eligibility.js';
-import { ruleMap } from '../src/layers/l2_parsing.js';
+import { mapFields } from '../src/layers/l2_parsing.js';
 import { reparse } from '../src/pipeline/pipeline.js';
 import type { FormSchema } from '../src/types.js';
 
@@ -36,7 +36,10 @@ function wouldQualifyNow(companyId: number): { ok: boolean; reason?: string } {
   const company = companies.byId(companyId);
   const schema = fieldMaps.latest(companyId);
   if (!company || !schema) return { ok: false, reason: 'スキーマ無し' };
-  const remapped = { ...schema, mappings: ruleMap(schema.fields).mappings } as FormSchema;
+  // 対応付けは mapFields で作る。ruleMap 単体だと姓名・フリガナ・住所・電話の
+  // 分割欄を拾う detectSplitFields が走らず、分割欄を持つフォームが
+  // 「必須なのに埋められない」に見えてしまう（本番の解析はこの合成を使う）。
+  const remapped = { ...schema, mappings: mapFields(schema.fields).mappings } as FormSchema;
   const verdict = classifyEligibility(remapped, computeCoverage(company, remapped));
   return verdict.eligible ? { ok: true } : { ok: false, reason: verdict.reason };
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ruleMap } from '../src/layers/l2_parsing.js';
+import { ruleMap, mapFields } from '../src/layers/l2_parsing.js';
 import { computeCoverage } from '../src/layers/coverage.js';
 import { shouldFillField } from '../src/layers/fillPolicy.js';
 import { classifyEligibility } from '../src/crosscutting/eligibility.js';
@@ -179,4 +179,36 @@ test('本当に消費者向けのフォームは今も除外する', () => {
     const v = classifyEligibility(schemaOf(fields), computeCoverage(company, schemaOf(fields)));
     assert.equal(v.reason, 'consumer_form', `${label} が消費者向けと判定されていない`);
   }
+});
+
+/* ----------------------- 分割欄を持つフォームの判定 ----------------------- */
+
+test('姓名・フリガナ・住所が分かれたフォームを「埋められない」と判定しない', () => {
+  // 対応付けは mapFields で作る必要がある。ruleMap 単体では
+  // detectSplitFields が走らず、姓/名・セイ/メイ・都道府県/市区町村/番地が
+  // どれも未マッピングになり、「必須なのに埋められない」として企業ごと
+  // 除外される。実データで最も多かった欠け（名 41 / メイ 15 / 姓 15）が
+  // これで、除外の集計自体を誤らせていた。
+  const fields = [
+    f({ labelText: '姓', name: 'sei', required: true }),
+    f({ labelText: '名', name: 'mei', required: true }),
+    f({ labelText: 'セイ', name: 'kana_sei', required: true }),
+    f({ labelText: 'メイ', name: 'kana_mei', required: true }),
+    f({ labelText: '都道府県', name: 'pref', required: true }),
+    f({ labelText: '市区町村', name: 'city', required: true }),
+    f({ labelText: '番地', name: 'street', required: true }),
+    f({ labelText: 'メールアドレス', name: 'email', type: 'email', required: true }),
+    f({ labelText: '会社名', name: 'company', required: true }),
+    f({ labelText: 'お問い合わせ内容', tag: 'textarea', type: 'textarea', required: true }),
+  ];
+
+  const withSplit = { ...schemaOf(fields), mappings: mapFields(fields).mappings } as FormSchema;
+  const roles = new Set(withSplit.mappings.map((m: { role: string }) => m.role));
+  for (const r of ['name_sei', 'name_mei', 'kana_sei', 'kana_mei']) {
+    assert.ok(roles.has(r), `${r} が対応付いていない`);
+  }
+
+  const cov = computeCoverage(company, withSplit);
+  assert.equal(cov.coverage.missing, 0, `欠け: ${cov.fields.filter((x: any) => x.status === 'missing').map((x: any) => x.label).join(', ')}`);
+  assert.equal(classifyEligibility(withSplit, cov).eligible, true);
 });
