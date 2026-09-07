@@ -145,8 +145,27 @@ const SIG_RULE = '■━━━━━━━━━━━━━━━━━━━�
  * actually type into the form. Lines whose value is unset are dropped rather
  * than left as a dangling label.
  */
-export function buildSignature(): string {
+export function buildSignature(opts: { compact?: boolean } = {}): string {
   const s = config.sender;
+
+  // 入力上限が厳しいフォーム向けの短い署名。
+  //
+  // §9 が求めるのは「送信者が誰で、どこへ返信すればよいか」であって、
+  // 住所・FAX・URL まで載せることではない。通常の署名は約 250 字あるため、
+  // 本文欄が 500 字のフォームでは署名だけで半分を占め、本文を削っても
+  // 収まらず企業ごと除外されていた。名乗りと連絡先だけに絞れば、伝わる
+  // 情報を落とさずに送れる。
+  if (opts.compact) {
+    const who = [s.company, s.department?.replace(/\s+/g, ' '), s.person.replace(/[\s　]+/g, '')]
+      .filter(Boolean)
+      .join(' ');
+    const contact = [s.email && `E-mail：${s.email}`, s.phone && `TEL：${s.phone}`]
+      .filter(Boolean)
+      .join(' / ');
+    return contact ? `${who}
+${contact}` : who;
+  }
+
   const lines: string[] = [SIG_RULE];
 
   if (s.company) lines.push(s.company);
@@ -268,6 +287,25 @@ export function renderContent(
   let body = full;
   for (let tier = 1; limit && body.length > limit && tier <= MAX_OPTIONAL_TIER; tier++) {
     body = shape(tier);
+  }
+
+  // 任意ブロックを全部落としても収まらないときの最後の手段として、署名を
+  // 短い形に差し替える。署名は約 250 字あり、本文欄 500 字のフォームでは
+  // それだけで半分を占める。本文の主張を削るより、住所や FAX を落とすほうが
+  // 失うものが少ない（名乗りと連絡先は残るので §9 は満たす）。
+  if (limit && body.length > limit) {
+    const compact = substitute(applyConditionals(tpl.body, { ...vars, signature: buildSignature({ compact: true }) }), {
+      ...vars,
+      signature: buildSignature({ compact: true }),
+    });
+    for (let tier = 0; tier <= MAX_OPTIONAL_TIER; tier++) {
+      const candidate = tidy(fitOptional(compact, tier));
+      if (candidate.length <= limit) {
+        body = candidate;
+        break;
+      }
+      if (tier === MAX_OPTIONAL_TIER) body = candidate;
+    }
   }
   if (body.length !== full.length) {
     log.warn(

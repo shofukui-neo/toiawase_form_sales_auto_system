@@ -88,7 +88,10 @@ export function classifyEligibility(schema: FormSchema, cov: CoverageResult): El
   // would silently cut the text mid-way and drop the signature — leaving a
   // message with no sender contact details, which §9 forbids.
   if (cov.coverage.overflow > 0) {
-    return { eligible: false, reason: 'message_too_long', detail: `${cov.coverage.overflow} 件` };
+    // 本文欄そのものが上限に収まらない場合だけ止める。本文が途中で切れると
+    // 署名が落ち、送信者の連絡先が無いメッセージになる (§9)。
+    // 件名など本文以外の超過はここに来ない（値を詰めて送る）。
+    return { eligible: false, reason: 'message_too_long', detail: `本文欄が上限超過 ${cov.coverage.overflow} 件` };
   }
 
   // Nowhere to put the sales pitch: neither a message body nor a company field

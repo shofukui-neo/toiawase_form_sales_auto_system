@@ -41,6 +41,8 @@ export interface Coverage {
   honeypots: number;
   /** Fields whose value exceeds the control's maxlength — silently truncated. */
   overflow: number;
+  /** 本文以外の欄で入力上限を超えた数。除外の理由にはしない。 */
+  otherOverflow: number;
 }
 
 export interface CoverageResult {
@@ -130,6 +132,8 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
   }
 
   let overflow = 0;
+  // 本文以外の欄の超過。送信を止める理由にはしないが、人が見て気づけるよう残す。
+  let otherOverflow = 0;
   const fields: FieldReview[] = schema.fields.map((f) => {
     const label = labelOf(f);
     const m = schema.mappings.find((mm) => mm.selector === f.selector);
@@ -157,7 +161,13 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
       // A maxlength shorter than the value means the browser silently truncates —
       // a half-sentence pitch reaching a real recipient. Flag it for a human.
       if (f.maxLength && resolved.length > f.maxLength) {
-        overflow++;
+        // 上限を超えるのがどの欄かで意味がまるで違う。本文が切れれば署名が
+        // 落ちて §9 に反するが、任意の付帯欄が切れても送信の価値は変わらない。
+        // 以前はどの欄の超過も一律 overflow に数え、除外理由まで
+        // 「本文が長すぎる」にしていたため、本文欄に上限すら無い企業が
+        // その理由で捨てられていた（158 社中 102 社）。
+        if (role === 'message') overflow++;
+        else otherOverflow++;
         return {
           ...base,
           value,
@@ -194,6 +204,7 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
     suspect: nonTrap.filter((f) => f.status === 'suspect').length,
     honeypots: fields.length - nonTrap.length,
     overflow,
+    otherOverflow,
   };
 
   return { fields, coverage, subject, body, values };
