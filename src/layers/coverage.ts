@@ -79,6 +79,45 @@ function baseRole(role: FieldRole): FieldRole {
 function labelOf(f: DetectedField): string {
   return (f.labelText || f.placeholder || f.name || f.id || '').replace(/\s+/g, ' ').trim();
 }
+
+/**
+ * 欄の見出しを比較用に揃える。
+ *
+ * 同じ「お名前」でも、フォームによって「名前」「名前必須」「名前 *」
+ * 「お名前（必須）」と書かれ方が違う。以前は完全一致で比べていたため、
+ * 姓と名に分かれた欄の片方だけが役割に対応づき、残りは「必須なのに
+ * 未マッピング」として企業ごと除外されていた。装飾を落として比べる。
+ */
+function labelKey(label: string): string {
+  return label
+    .replace(/[（(【\[]?\s*(必須|required|任意|optional)\s*[)）】\]]?/gi, '')
+    .replace(/[*＊※:：]/g, '')
+    .replace(/[\s　]/g, '')
+    .toLowerCase();
+}
+
+/**
+ * サイト内検索の入力欄。問い合わせフォームの一部ではないので、必須に
+ * 見えても送信可否の判断に混ぜない。実データでは「検索」「キーワード検索」
+ * が必須欄として数えられ、それだけで企業が除外されていた。
+ */
+function isSiteSearch(f: DetectedField): boolean {
+  if ((f.type || '').toLowerCase() === 'search') return true;
+  const hay = [f.labelText, f.name, f.id, f.placeholder].filter(Boolean).join(' ').toLowerCase();
+  if (/検索|keyword|キーワード/.test(hay)) return true;
+  // name="s" / name="q" は検索ボックスの慣用。
+  return /^(s|q|search|query)$/i.test(f.name ?? '');
+}
+
+/**
+ * 「このフィールドは空のままにしてください」のように、見出し自体が
+ * 空欄のままにするよう指示している欄。名前による罠検出をすり抜けるが、
+ * 入力すれば弾かれる。
+ */
+function saysLeaveEmpty(f: DetectedField): boolean {
+  const hay = [f.labelText, f.placeholder].filter(Boolean).join(' ');
+  return /空のまま|空欄のまま|入力しないで|leave (this )?(field )?empty|do not fill/i.test(hay);
+}
 function fieldHay(f: DetectedField): string {
   return [f.labelText, f.name, f.id, f.placeholder, f.autocomplete].filter(Boolean).join(' ');
 }
@@ -128,7 +167,7 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
   const mappedLabels = new Set<string>();
   for (const m of schema.mappings) {
     const f = schema.fields.find((x) => x.selector === m.selector);
-    if (f) mappedLabels.add(labelOf(f));
+    if (f) mappedLabels.add(labelKey(labelOf(f)));
   }
 
   let overflow = 0;
@@ -141,7 +180,13 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
     const conf = m?.confidence ?? null;
     const base = { label, required: f.required, tag: f.tag, type: f.type, role, confidence: conf };
 
-    if (f.honeypot) return { ...base, value: '（罠：入力しない）', status: 'honeypot', note: 'ハニーポット' };
+    if (f.honeypot || saysLeaveEmpty(f)) {
+      return { ...base, value: '（罠：入力しない）', status: 'honeypot', note: 'ハニーポット' };
+    }
+    // サイト内検索は問い合わせフォームの欄ではない。必須に見えても無視する。
+    if (isSiteSearch(f)) {
+      return { ...base, required: false, value: '—（サイト内検索）', status: 'optional', note: '' };
+    }
     if (role === 'agree') return { ...base, value: '☑ 同意する', status: 'ok', note: '' };
     if (role === 'choice') {
       return { ...base, value: m?.value ?? '（実行時に自動選択）', status: 'auto', note: '自動選択（要確認）' };
@@ -189,7 +234,7 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
     if (isChoiceLike) {
       return { ...base, role: null, value: '（実行時に自動選択）', status: 'auto', note: '未マッピングの必須選択・自動選択される' };
     }
-    if (mappedLabels.has(label)) {
+    if (mappedLabels.has(labelKey(label))) {
       return { ...base, role: null, value: '（分割入力・自動）', status: 'auto', note: '同名欄の分割入力' };
     }
     return { ...base, role: null, value: '（未入力）', status: 'missing', note: '必須だが未マッピング＝空欄のまま' };

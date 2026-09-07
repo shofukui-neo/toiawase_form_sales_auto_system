@@ -35,6 +35,7 @@ export type FieldRole =
   | 'email' // メール
   | 'email_confirm' // メール（確認再入力）
   | 'phone' // 電話（1欄）
+  | 'fax' // FAX（必須にしているフォームがあり、実際に番号を持っているので埋める）
   | 'phone1' // 電話 市外局番（分割1）
   | 'phone2' // 電話 市内局番（分割2）
   | 'phone3' // 電話 加入者番号（分割3）

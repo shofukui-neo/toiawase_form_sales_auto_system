@@ -27,6 +27,9 @@ const TEXT_ROLES: FieldRole[] = [
   'postal', 'postal1', 'postal2',
   'address', 'address_pref', 'address_city', 'address_street',
   'department', 'subject', 'message',
+  // FAX は必須指定のフォームでのみ入る (shouldFillField が非コア役割を
+  // 必須欄に限定する)。任意の FAX 欄には入力しない。
+  'fax',
 ];
 
 /**

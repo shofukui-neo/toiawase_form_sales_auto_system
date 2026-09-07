@@ -339,6 +339,9 @@ export function renderContent(
     values.email_confirm = s.email; // メール（確認）再入力欄 (課題D)
   }
   if (s.phone) values.phone = s.phone;
+  // FAX は必須にしているフォームでのみ埋まる（fax は CORE_ROLES に入れて
+  // いないので、任意欄には入力しない）。実在の番号なので嘘にはならない。
+  if (s.fax) values.fax = s.fax;
   if (s.department) values.department = s.department;
   if (s.postal) values.postal = s.postal;
   if (s.address) values.address = s.address;
