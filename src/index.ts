@@ -11,6 +11,7 @@ import { exportReport, exportSuppression } from './layers/l6_record.js';
 import { formatFunnel } from './pipeline/funnel.js';
 import { assignVariant, experimentWarnings, VARIANTS } from './pipeline/experiment.js';
 import { importReplies } from './pipeline/replyImport.js';
+import { preflight, formatPreflight } from './pipeline/preflight.js';
 import { transition } from './core/stateMachine.js';
 import { nextSendDelayMs } from './crosscutting/pacing.js';
 import type { CompanyStatus, SuppressionReason } from './types.js';
@@ -284,6 +285,15 @@ program
       const res = await syncSheets();
       console.log(res.synced ? `Sheets: synced report=${res.reportRows} suppression=${res.suppressionRows}` : `Sheets: skipped (${res.reason})`);
     }
+  });
+
+program
+  .command('preflight')
+  .description('送信前の点検 — 名乗り・文面・割り当て・証拠・記録が揃っているか')
+  .action(() => {
+    const checks = preflight();
+    console.log(formatPreflight(checks));
+    if (checks.some((c) => c.level === 'ng')) process.exitCode = 1;
   });
 
 program
