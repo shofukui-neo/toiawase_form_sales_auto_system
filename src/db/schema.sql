@@ -231,3 +231,26 @@ CREATE TABLE IF NOT EXISTS email_events (
 );
 CREATE INDEX IF NOT EXISTS idx_email_events_send ON email_events(send_id, kind);
 CREATE INDEX IF NOT EXISTS idx_email_events_kind ON email_events(kind, ts);
+
+-- ======================== 成果 (返信・アポ) の記録 ===========================
+-- フォーム営業の唯一の目的はアポであるのに、これまで結果を保存する場所が
+-- どこにも無かった。送信数だけが増え、何通送って何件返ってきたのかを
+-- 誰も計算できない状態では、文面もターゲットも改善のしようがない。
+-- 1 行 = 1 つの反応。同じ企業から「返信 → アポ」と続けば 2 行になる。
+CREATE TABLE IF NOT EXISTS outcomes (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id    INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  submission_id INTEGER REFERENCES submissions(id) ON DELETE SET NULL,
+  -- reply=何らかの返信 / appointment=アポ獲得 / refusal=お断り
+  -- / optout=今後不要 / bounce=届いていない(エラー通知)
+  kind          TEXT NOT NULL,
+  -- どこで観測したか: inbox / manual / booking / phone
+  source        TEXT NOT NULL DEFAULT 'manual',
+  -- 送信からこの反応までの日数。文面の即効性を見るために保存する。
+  days_after    REAL,
+  note          TEXT,
+  occurred_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_outcomes_company ON outcomes(company_id);
+CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, occurred_at);

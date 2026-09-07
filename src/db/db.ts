@@ -31,8 +31,30 @@ export function db(): Database.Database {
   }
   const schema = readFileSync(resolve(__dirname, 'schema.sql'), 'utf8');
   conn.exec(schema);
+  migrate(conn);
   _db = conn;
   return _db;
+}
+
+/**
+ * 後から足した列を、既存の DB にも入れる。
+ *
+ * schema.sql は `CREATE TABLE IF NOT EXISTS` なので、既に表がある DB では
+ * 新しい列定義が一切適用されない。列を足すたびに DB を作り直すわけには
+ * いかない（送信履歴が唯一の実績データなので）ため、不足分だけ ALTER する。
+ * 追加のみ・NULL 許容のみに限定しているので、途中で落ちても壊れない。
+ */
+function migrate(conn: Database.Database): void {
+  const addColumn = (table: string, column: string, decl: string) => {
+    const cols = conn.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (cols.some((c) => c.name === column)) return;
+    conn.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  };
+  // 送信結果の証拠。これが無いと「成功」と記録された行を後から検証できない。
+  addColumn('submissions', 'result_screenshot_url', 'TEXT');
+  addColumn('submissions', 'result_text', 'TEXT');
+  // どの文面パターンで送ったか。返信率を文面ごとに比較するための軸。
+  addColumn('submissions', 'variant', 'TEXT');
 }
 
 /**

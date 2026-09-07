@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs';
 import { Command } from 'commander';
-import { companies } from './db/repositories.js';
+import { companies, outcomes, type OutcomeKind } from './db/repositories.js';
 import { ingestCsv, ingestCsvWithResolve, parseCompaniesCsv } from './layers/l0_list.js';
 import { resolveHomepage } from './layers/l0_homepage.js';
 import { discoverAndIngestCompanyRows } from './layers/l0_autodiscovery.js';
 import { discoverAndParse, buildPlan, runExecute, reparse } from './pipeline/pipeline.js';
 import { listPending, approve, reject, suppressCompany } from './pipeline/approval.js';
 import { exportReport, exportSuppression } from './layers/l6_record.js';
+import { formatFunnel } from './pipeline/funnel.js';
+import { transition } from './core/stateMachine.js';
 import { nextSendDelayMs } from './crosscutting/pacing.js';
 import type { CompanyStatus, SuppressionReason } from './types.js';
 import { logger } from './utils/logger.js';
@@ -280,6 +282,50 @@ program
       const res = await syncSheets();
       console.log(res.synced ? `Sheets: synced report=${res.reportRows} suppression=${res.suppressionRows}` : `Sheets: skipped (${res.reason})`);
     }
+  });
+
+program
+  .command('funnel')
+  .description('アポ率ファネル — 送信 → 到達 → 返信 → アポ を文面パターン別に集計')
+  .option('--days <n>', '直近 N 日に絞る')
+  .action((o: { days?: string }) => {
+    console.log(formatFunnel(o.days ? Number(o.days) : undefined));
+  });
+
+program
+  .command('outcome')
+  .description('送信の「その後」を記録する — これを入れない限りアポ率は測れない')
+  .argument('<companyId>', '企業ID')
+  .argument('<kind>', 'reply | appointment | refusal | optout | bounce')
+  .option('--note <text>', 'メモ（返信の要旨など）')
+  .option('--source <src>', '観測元 (inbox/manual/booking/phone)', 'manual')
+  .option('--at <datetime>', '実際に起きた日時 (YYYY-MM-DD HH:MM)')
+  .action((companyId: string, kind: string, o: { note?: string; source: string; at?: string }) => {
+    const allowed: OutcomeKind[] = ['reply', 'appointment', 'refusal', 'optout', 'bounce'];
+    if (!allowed.includes(kind as OutcomeKind)) {
+      console.error(`kind は次のいずれか: ${allowed.join(' | ')}`);
+      process.exitCode = 1;
+      return;
+    }
+    const id = Number(companyId);
+    const company = companies.byId(id);
+    if (!company) {
+      console.error(`企業 ${id} が見つかりません`);
+      process.exitCode = 1;
+      return;
+    }
+    outcomes.record({
+      companyId: id,
+      kind: kind as OutcomeKind,
+      source: o.source,
+      note: o.note ?? null,
+      occurredAt: o.at ?? null,
+    });
+    // アポは選考の終点なので企業の状態にも反映する（返信済みとして扱う）。
+    if ((kind === 'reply' || kind === 'appointment') && company.status === 'SUBMITTED_SUCCESS') {
+      transition(id, 'REPLIED', { actor: 'human', detail: `outcome:${kind}` });
+    }
+    console.log(`記録: 企業 ${id} (${company.name}) → ${kind}`);
   });
 
 program

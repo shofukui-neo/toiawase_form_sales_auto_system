@@ -268,14 +268,25 @@ export async function runExecute(companyId: number): Promise<void> {
 
   const sub = submissions.latestForCompany(company.id);
   try {
-    const { judgment } = await executeSubmission(company, schema, content);
-    submissions.setResult(sub.id, judgment.status, judgment.detail);
+    const { judgment, resultScreenshotUrl } = await executeSubmission(company, schema, content);
+    submissions.setResult(sub.id, judgment.status, judgment.detail, {
+      screenshotUrl: resultScreenshotUrl,
+      text: judgment.evidenceText ?? null,
+    });
     recordSend(company.id);
 
     switch (judgment.status) {
       case 'submitted_success':
         markSent(company.domain); // never contact twice (§9)
         transition(company.id, 'SUBMITTED_SUCCESS', { detail: judgment.detail });
+        break;
+      case 'uncertain':
+        // 送れたか分からない＝送れてしまっている可能性がある。**抑制はかける。**
+        // 二重送信は相手にとって成功の失敗より明確に迷惑で、取り返しがつかない。
+        // 一方で成功には数えない（返信率の母数を汚さない）ので、人が結果画面の
+        // 証拠を見て判断できるよう NEEDS_REVIEW に置く。
+        markSent(company.domain);
+        transition(company.id, 'NEEDS_REVIEW', { detail: judgment.detail });
         break;
       case 'failed':
         transition(company.id, 'SUBMITTED_FAILED', { detail: judgment.detail });

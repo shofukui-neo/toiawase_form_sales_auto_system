@@ -161,6 +161,9 @@ export interface RenderedContent {
 export type SubmissionStatus =
   | 'plan_ready'
   | 'submitted_success'
+  // 送信できたと確証が持てないもの。成功に混ぜると返信率・アポ率の母数が
+  // 壊れて改善の判断ができなくなるので、正直に別バケットへ出す (L5)。
+  | 'uncertain'
   | 'failed'
   | 'captcha'
   | 'needs_review';

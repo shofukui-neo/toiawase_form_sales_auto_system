@@ -367,9 +367,31 @@ async function planSubmissionInSlot(
   }
 }
 
+/**
+ * 送信直後の画面を残す。証拠が無い送信は検証できず、検証できない数字では
+ * 何を変えれば返信が増えるのか判断できない。撮影の失敗は送信結果より軽いので
+ * 例外は握りつぶし、パスが取れなければ null を返す。
+ */
+async function captureResult(page: Page, companyId: number, tag: string): Promise<string | null> {
+  const path = resolve(config.artifactsDir, `result_${companyId}.png`);
+  try {
+    await page.screenshot({ path, fullPage: true, timeout: 10000 });
+    return path;
+  } catch (e) {
+    log.warn(`result screenshot failed company=${companyId} (${tag}): ${(e as Error).message}`);
+    return null;
+  }
+}
+
 export interface ExecuteResult {
   judgment: Judgment;
   finalUrl: string;
+  /**
+   * 送信直後の画面のスクリーンショット。**これが無いと「成功」と記録された行を
+   * 後から検証する手段が一切ない。** 実際、旧実装では plan の 2,256 枚に対し
+   * 結果の証拠は 0 枚で、届いていない送信を成功として数え続けていた。
+   */
+  resultScreenshotUrl: string | null;
 }
 
 /**
@@ -419,9 +441,11 @@ async function executeSubmissionInSlot(
       buttons.find((b) => b.kind === 'other' && !/戻|修正|back|edit/i.test(b.text));
 
     if (!submitBtn) {
+      const shot = await captureResult(page, company.id, 'nosubmit');
       return {
         judgment: { status: 'needs_review', detail: 'no submit button found after fill/confirm' },
         finalUrl: page.url(),
+        resultScreenshotUrl: shot,
       };
     }
 
@@ -435,9 +459,14 @@ async function executeSubmissionInSlot(
       page,
       beforeUrl,
       captchaPresent: schema.hasCaptcha !== 'none',
+      // 入力した本文が送信後のページに残っているかを見るため L5 に渡す。
+      sentBody: content.body,
     });
+    // 判定の後で撮る。判定が例外を投げても送信自体は済んでいるので、
+    // 証拠取得の失敗で結果を握りつぶさないよう captureResult は投げない。
+    const resultScreenshotUrl = await captureResult(page, company.id, judgment.status);
     log.info(`execute company=${company.id} -> ${judgment.status} (${judgment.detail})`);
-    return { judgment, finalUrl: page.url() };
+    return { judgment, finalUrl: page.url(), resultScreenshotUrl };
   } finally {
     await session.close();
   }

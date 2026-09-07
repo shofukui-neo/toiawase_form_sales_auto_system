@@ -218,14 +218,82 @@ export const submissions = {
     );
   },
 
-  setResult(id: number, status: SubmissionStatus, detail: string): void {
+  /**
+   * 送信結果を確定する。`evidence` は送信直後の画面の証拠（スクリーンショットの
+   * パスと可視テキストの冒頭）。**結果と一緒に必ず残す。** 証拠の無い成功行は
+   * 後から真偽を確かめられず、返信率の母数として使えないため。
+   */
+  setResult(
+    id: number,
+    status: SubmissionStatus,
+    detail: string,
+    evidence: { screenshotUrl?: string | null; text?: string | null } = {},
+  ): void {
     prep(
-      `UPDATE submissions SET status = ?, result_detail = ?, submitted_at = datetime('now') WHERE id = ?`,
-    ).run(status, detail, id);
+      `UPDATE submissions
+          SET status = ?, result_detail = ?, submitted_at = datetime('now'),
+              result_screenshot_url = COALESCE(?, result_screenshot_url),
+              result_text = COALESCE(?, result_text)
+        WHERE id = ?`,
+    ).run(status, detail, evidence.screenshotUrl ?? null, evidence.text ?? null, id);
+  },
+
+  /** この送信に使った文面パターンを記録する（文面別の返信率を出すための軸）。 */
+  setVariant(id: number, variant: string): void {
+    prep('UPDATE submissions SET variant = ? WHERE id = ?').run(variant, id);
   },
 
   all(limit = 5000): any[] {
     return prep('SELECT * FROM submissions ORDER BY id ASC LIMIT ?').all(limit);
+  },
+};
+
+/* -------------------------------- outcomes -------------------------------- */
+
+export type OutcomeKind = 'reply' | 'appointment' | 'refusal' | 'optout' | 'bounce';
+
+/**
+ * 送信の「その後」。ここに 1 行も入っていない限り、システムは自分が成果を
+ * 出せているのか判断できない。送信数ではなく、この表の行数が目的関数になる。
+ */
+export const outcomes = {
+  record(input: {
+    companyId: number;
+    submissionId?: number | null;
+    kind: OutcomeKind;
+    source?: string;
+    note?: string | null;
+    occurredAt?: string | null;
+  }): number {
+    // 送信からの経過日数は記録時に確定させる。後から submitted_at を引き直すと
+    // 再送信で送信日時が上書きされた行で計算が狂う。
+    const info = prep(
+      `INSERT INTO outcomes (company_id, submission_id, kind, source, note, occurred_at, days_after)
+       VALUES (@companyId, @submissionId, @kind, @source, @note,
+               COALESCE(@occurredAt, datetime('now')),
+               (SELECT julianday(COALESCE(@occurredAt, datetime('now'))) - julianday(s.submitted_at)
+                  FROM submissions s
+                 WHERE s.id = COALESCE(@submissionId,
+                       (SELECT id FROM submissions
+                         WHERE company_id = @companyId AND submitted_at IS NOT NULL
+                         ORDER BY id DESC LIMIT 1))))`,
+    ).run({
+      companyId: input.companyId,
+      submissionId: input.submissionId ?? null,
+      kind: input.kind,
+      source: input.source ?? 'manual',
+      note: input.note ?? null,
+      occurredAt: input.occurredAt ?? null,
+    });
+    return Number(info.lastInsertRowid);
+  },
+
+  forCompany(companyId: number): any[] {
+    return prep('SELECT * FROM outcomes WHERE company_id = ? ORDER BY id ASC').all(companyId);
+  },
+
+  countByKind(): { kind: string; n: number }[] {
+    return prep('SELECT kind, COUNT(*) n FROM outcomes GROUP BY kind ORDER BY n DESC').all() as any;
   },
 };
 

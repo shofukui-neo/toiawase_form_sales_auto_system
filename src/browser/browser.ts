@@ -152,8 +152,20 @@ export class BrowserSession {
   }
 
   /**
-   * Type text one char at a time with per-char jitter (bot-safe; §4-L4:
-   * "type() 1 char at a time; bulk value-set is bot-smelling").
+   * 実キーイベントで入力する。値を一括代入しないのは §4-L4 のとおりだが、
+   * **1文字ごとに `el.type()` を呼ぶのはやめる。**
+   *
+   * 旧実装は 1 文字 = Playwright の 1 往復だった。本文は約 1,050 字あるので
+   * 1 通あたり 1,050 往復・実測で 45 秒前後かかり、
+   *   - 送信 1 件の所要時間が跳ね上がって 1 日の送信可能数を圧迫する
+   *   - Chromium が途中で落ちる（e2e で `Target crashed` を再現）
+   *   - 入力中にフォームが再描画されるとロケータが剥がれる
+   * という副作用が出ていた。実際、送信結果で最も多いのは「到達」ではなく
+   * `needs_review` 514 件で、その内訳は click タイムアウト 241 件である。
+   *
+   * キーイベントを 1 文字ずつ発火させる性質は `pressSequentially` が保つので、
+   * ボット対策上の意味は変えずに、往復だけをチャンク単位へまとめる。
+   * 人間らしい打鍵のムラはチャンク間の休止で作る。
    */
   async humanType(page: Page, selector: string, text: string): Promise<void> {
     const el = page.locator(selector).first();
@@ -163,8 +175,30 @@ export class BrowserSession {
     // form's 郵便番号→住所 lookup) so we replace rather than append to it.
     await el.fill('').catch(() => {});
     await this.humanDelay(80, 250);
-    for (const ch of text) {
-      await el.type(ch, { delay: 15 + Math.floor(this.rng() * 60) });
+
+    // 打鍵間隔は欄の長さで変える。氏名・メールのような短い欄は人が実際に打つ
+    // 速さ（8-30ms/字）を保つ。一方、本文は 1,000 字を超えるので同じ速さだと
+    // 1 通に 1 分かかる。長文を人が 1 分かけて打ち込むことはまずなく（普通は
+    // 用意した文面を貼る）、遅いこと自体は人間らしさの担保になっていない。
+    // キーイベントを 1 文字ずつ出す性質は保ったまま、間隔だけ詰める。
+    const longText = text.length > 200;
+    // 短い欄（氏名・メール等）は 1 チャンクで済む。長文だけが分割される。
+    const CHUNK = 48;
+    for (let i = 0; i < text.length; i += CHUNK) {
+      const chunk = text.slice(i, i + CHUNK);
+      const delay = longText ? 1 + Math.floor(this.rng() * 4) : 8 + Math.floor(this.rng() * 22);
+      // pressSequentially は 1 呼び出しの中で 1 文字ずつキーを送る（往復は 1 回）。
+      const target = el as unknown as {
+        pressSequentially?: (t: string, o: { delay: number }) => Promise<void>;
+        type: (t: string, o: { delay: number }) => Promise<void>;
+      };
+      if (typeof target.pressSequentially === 'function') {
+        await target.pressSequentially(chunk, { delay });
+      } else {
+        await target.type(chunk, { delay });
+      }
+      // 打鍵の合間の「考えている時間」。長文ほど回数が増え、単調さが消える。
+      if (i + CHUNK < text.length) await this.humanDelay(longText ? 15 : 40, longText ? 60 : 160);
     }
   }
 
