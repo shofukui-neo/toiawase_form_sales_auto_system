@@ -190,6 +190,12 @@ export function computeCoverage(company: CompanyRow, schema: FormSchema): Covera
     if (f.honeypot || saysLeaveEmpty(f)) {
       return { ...base, value: '（罠：入力しない）', status: 'honeypot', note: 'ハニーポット' };
     }
+    // hidden はフォーム基盤が自分で値を入れる内部用の欄で、人は入力しない。
+    // required 扱いのまま残ると「必須なのに埋められない」に数えられ、
+    // それだけで企業が除外される（DNN の hdnFieldType / hdnItemID など）。
+    if ((f.type || '').toLowerCase() === 'hidden') {
+      return { ...base, required: false, value: '—（hidden）', status: 'optional', note: '' };
+    }
     // サイト内検索は問い合わせフォームの欄ではない。必須に見えても無視する。
     if (isSiteSearch(f)) {
       return { ...base, required: false, value: '—（サイト内検索）', status: 'optional', note: '' };

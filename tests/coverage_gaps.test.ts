@@ -212,3 +212,29 @@ test('姓名・フリガナ・住所が分かれたフォームを「埋めら�
   assert.equal(cov.coverage.missing, 0, `欠け: ${cov.fields.filter((x: any) => x.status === 'missing').map((x: any) => x.label).join(', ')}`);
   assert.equal(classifyEligibility(withSplit, cov).eligible, true);
 });
+
+/* ---------------------------- hidden 欄の扱い ---------------------------- */
+
+test('hidden 欄を「埋められない必須欄」に数えない', () => {
+  // フォーム基盤（DNN 等）は hdnFieldType / hdnItemID のような内部用の
+  // hidden を置き、見えている欄と同じ見出しを付ける。required 扱いのまま
+  // 残ると、人には入力しようのない欄で企業が除外される。
+  const fields = [
+    f({ labelText: 'メールアドレス必須', name: 'hdnFieldType', type: 'hidden', required: true }),
+    f({ labelText: 'メールアドレス必須', name: 'hdnItemID', type: 'hidden', required: true }),
+    f({ labelText: 'メールアドレス', name: 'txtEmail', required: true }),
+    f({ labelText: 'お問い合わせ内容', tag: 'textarea', type: 'textarea', required: true }),
+  ];
+  assert.deepEqual(missingLabels(fields), []);
+});
+
+test('hidden 欄に役割を取られて、可視の欄が未入力のまま残らない', () => {
+  // hidden が先に email を取ると、実際に入力すべき可視欄が未マッピングになる。
+  const fields = [
+    f({ labelText: 'メールアドレス必須', name: 'hdnFieldType', type: 'hidden', required: true }),
+    f({ labelText: 'メールアドレス', name: 'txtEmail', required: true }),
+  ];
+  const m = mapFields(fields).mappings.find((x: { role: string }) => x.role === 'email');
+  assert.ok(m, 'メール欄が対応付いていない');
+  assert.equal(m!.selector, fields[1].selector, 'hidden 欄に役割が付いている');
+});

@@ -48,6 +48,11 @@ export function ruleMap(
   fields.forEach((f, idx) => {
     if (f.honeypot) return; // ④: never touch honeypots
     if (skip.has(idx)) return; // already claimed by the split-field detector (課題A)
+    // hidden は人が入力する欄ではない。フォーム基盤（DNN 等）は
+    // hdnFieldType / hdnItemID のような内部用の hidden に、見えている欄と
+    // 同じ見出しを付けることがある。役割を取られると、実際に入力すべき
+    // 可視欄が未マッピングのまま残る。
+    if ((f.type || '').toLowerCase() === 'hidden') return;
     const hay = haystack(f);
     const fType = (f.type || '').toLowerCase();
     for (const rule of ROLE_RULES) {
