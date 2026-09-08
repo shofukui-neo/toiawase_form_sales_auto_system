@@ -6,11 +6,13 @@ import { detectChoiceFields } from './l2_choice.js';
 import { classifyAmbiguousFields } from './l2_llm.js';
 import { computeGate } from '../core/gate.js';
 import { detectNoSalesPolicy } from '../crosscutting/compliance.js';
+import { classifyFormAudience } from '../crosscutting/formAudience.js';
 import {
   extractFields,
   extractButtons,
   detectCaptcha,
   getVisibleText,
+  getPageHeading,
   primaryFormSelector,
 } from '../browser/extract.js';
 import { BrowserSession, withBrowserSlot } from '../browser/browser.js';
@@ -214,11 +216,12 @@ async function parseFormInSlot(input: ParseInput): Promise<FormSchema> {
       await page.goto(formUrl, { waitUntil: 'domcontentloaded' });
     }
 
-    const [fields, buttons, captcha, visibleText, formSelector] = await Promise.all([
+    const [fields, buttons, captcha, visibleText, heading, formSelector] = await Promise.all([
       extractFields(page),
       extractButtons(page),
       detectCaptcha(page),
       getVisibleText(page),
+      getPageHeading(page),
       primaryFormSelector(page),
     ]);
 
@@ -234,6 +237,8 @@ async function parseFormInSlot(input: ParseInput): Promise<FormSchema> {
     const hasHoneypot = fields.some((f) => f.honeypot);
     const hasConfirmScreen = buttons.some((b) => b.kind === 'confirm');
     const noSalesHit = detectNoSalesPolicy(visibleText);
+    // 窓口の宛先。求職者向けの応募・選考窓口はここで見分け、eligibility が除外する。
+    const audience = classifyFormAudience({ formUrl, fields, heading, pageText: visibleText });
 
     const partial: FormSchema = {
       formUrl,
@@ -244,6 +249,8 @@ async function parseFormInSlot(input: ParseInput): Promise<FormSchema> {
       hasCaptcha: captcha,
       hasHoneypot,
       noSalesPolicy: noSalesHit !== null,
+      audience: audience.audience,
+      audienceEvidence: audience.evidence,
       ambiguousChoice,
       mappingConfidence: 0,
       gate: 'low',
@@ -257,6 +264,9 @@ async function parseFormInSlot(input: ParseInput): Promise<FormSchema> {
       `${formUrl} fields=${fields.length} mapped=${mappings.length} confirm=${hasConfirmScreen} captcha=${captcha} gate=${gate.gate} (${gate.reasons.join('|')})`,
     );
     if (noSalesHit) log.warn(`no-sales policy detected: "${noSalesHit}"`);
+    if (audience.audience === 'job_seeker') {
+      log.warn(`${formUrl} は求職者向けの窓口 (${audience.evidence}) — 営業の宛先ではない`);
+    }
 
     return partial;
   } finally {

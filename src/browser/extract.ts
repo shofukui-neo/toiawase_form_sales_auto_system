@@ -355,6 +355,18 @@ export async function getVisibleText(page: Page): Promise<string> {
   return page.evaluate(() => document.body?.innerText || '') as Promise<string>;
 }
 
+/**
+ * <title> と最初の見出し。窓口の用途（「採用に関するお問い合わせ」等）が
+ * 最も端的に出る場所なので、宛先判定 (formAudience) に使う。ナビゲーションの
+ * 見出しを拾わないよう h1 までに絞る。
+ */
+export async function getPageHeading(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const h1 = document.querySelector('h1');
+    return `${document.title || ''} ${h1?.textContent || ''}`.trim();
+  }) as Promise<string>;
+}
+
 /** Locate the <form> element selector that contains the most fields. */
 export async function primaryFormSelector(page: Page): Promise<string> {
   return page.evaluate(() => {

@@ -7,6 +7,7 @@ import { renderContent } from '../layers/l3_content.js';
 import { assignVariant, variantByName } from './experiment.js';
 import { computeCoverage } from '../layers/coverage.js';
 import { classifyEligibility } from '../crosscutting/eligibility.js';
+import { classifyFormAudience } from '../crosscutting/formAudience.js';
 import { planSubmission, executeSubmission } from '../layers/l4_submit.js';
 import { preSendCheck, markSent } from '../crosscutting/compliance.js';
 import { verifyContent, summarizeIssues } from '../crosscutting/contentGuard.js';
@@ -246,6 +247,18 @@ export async function runExecute(companyId: number): Promise<void> {
   }
 
   const schema = fieldMaps.latest(company.id)!;
+  // 送信直前の最終確認 — 求職者向けの窓口には送らない。承認済みでもここで止める
+  // （判定を入れる前に承認待ちへ積まれた企業が残っているため）。
+  const audience =
+    schema.audience ?? classifyFormAudience({ formUrl: schema.formUrl, fields: schema.fields }).audience;
+  if (audience === 'job_seeker') {
+    const why = schema.audienceEvidence || '応募・選考の窓口';
+    suppression.add(company.domain, 'ineligible_form');
+    transition(company.id, 'SUPPRESSED', { force: true, detail: `ineligible:job_seeker_form:${why}` });
+    audit.log({ companyId: company.id, layer: 'L4', action: 'exclude:job_seeker_form', detail: why });
+    log.info(`求職者向けの窓口のため送信中止 company=${companyId} (${why})`);
+    return;
+  }
   // プラン時に決めた文面パターンをそのまま使う。ここで引き直さないと、
   // 承認画面で見た文面と実際に送る文面が別物になる（既定テンプレートに
   // 戻ってしまう）。プレビュー == 送信内容 はこの仕組みの前提なので、

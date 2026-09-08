@@ -283,7 +283,7 @@
     <section class="tab" id="tab-review">
       <div class="section-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         <span>承認待ち（各フォームの入力内容を項目単位で確認）</span>
-        <button id="sweep" style="margin-left:auto" title="消費者向け/CAPTCHA/入力不能な必須を持つフォームをキューから自動除外">非適格を自動除外</button>
+        <button id="sweep" style="margin-left:auto" title="消費者向け/求職者向けの応募窓口/CAPTCHA/入力不能な必須を持つフォームをキューから自動除外">非適格を自動除外</button>
       </div>
       <div id="pending"></div>
       <div class="section-title" id="excluded-title" style="display:none">自動除外（非B2B / CAPTCHA / 入力不能な必須）</div>
@@ -564,7 +564,7 @@
       $('#blockedBody').innerHTML = s.blocked.map(blockedRow).join('');
     }
 
-    const EXCL_REASON = { captcha:'CAPTCHA必須', no_sales_policy:'営業お断り', consumer_form:'消費者向け/非B2B', unfillable_required:'入力不能な必須あり', not_contactable:'本文/会社名の入力先なし' };
+    const EXCL_REASON = { captcha:'CAPTCHA必須', no_sales_policy:'営業お断り', consumer_form:'消費者向け/非B2B', job_seeker_form:'求職者向けの応募・選考窓口', off_topic_form:'用途違い（通報・苦情等）', message_too_long:'本文が入力上限を超過', unfillable_required:'入力不能な必須あり', not_contactable:'本文/会社名の入力先なし' };
     function excludedCard(it){
       return `<div class="card" data-id="${it.companyId}">
         <div class="chead"><h2>#${it.companyId} ${esc(it.name)}</h2>

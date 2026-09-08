@@ -2,7 +2,8 @@ import * as cheerio from 'cheerio/slim';
 import { XMLParser } from 'fast-xml-parser';
 import { baseUrl, normalizeDomain, resolveUrl, sameSite } from '../utils/url.js';
 import { BrowserSession, withBrowserSlot } from '../browser/browser.js';
-import { extractFields } from '../browser/extract.js';
+import { extractFields, getPageHeading, getVisibleText } from '../browser/extract.js';
+import { looksLikeJobSeekerPage } from '../crosscutting/formAudience.js';
 import { fetchPage as httpFetchPage } from '../utils/http.js';
 import { logger } from '../utils/logger.js';
 
@@ -74,6 +75,17 @@ function staticFormSignals(html: string): FormSignals {
 function looksLikeContactForm(s: FormSignals): boolean {
   if (!s.hasForm) return false;
   return s.hasTextarea || s.fillableCount >= 3;
+}
+
+/**
+ * 応募受付のページか（採用サイトのお問い合わせ・エントリーフォーム）。
+ * 送信先は企業として応対している窓口に限るので、候補の段階で外す。
+ * 会社の総合窓口が別にあれば、そちらが候補として残る。
+ */
+function jobSeekerEvidence(url: string, html: string): string | null {
+  const $ = cheerio.load(html);
+  const heading = `${$('title').first().text()} ${$('h1').first().text()}`;
+  return looksLikeJobSeekerPage({ url, heading, pageText: $('body').text() });
 }
 
 function scoreForm(url: string, s: FormSignals, method: DiscoveryMethod): number {
@@ -181,6 +193,13 @@ async function browserConfirmInSlot(urls: string[]): Promise<DiscoveryResult | n
         };
         if (looksLikeContactForm(signals)) {
           const finalUrl = page.url();
+          // レンダリング後に初めて分かる採用サイトの窓口もある（SPA の見出し）。
+          const [heading, text] = await Promise.all([getPageHeading(page), getVisibleText(page)]);
+          const applicantPage = looksLikeJobSeekerPage({ url: finalUrl, heading, pageText: text });
+          if (applicantPage) {
+            log.debug(`${finalUrl} は求職者向けの窓口 (${applicantPage}) — 候補から外す`);
+            continue;
+          }
           return { formUrl: finalUrl, confidence: scoreForm(finalUrl, signals, 'browser_render'), method: 'browser_render' };
         }
       } catch (e) {
@@ -211,9 +230,15 @@ export async function discoverForm(domain: string, opts: DiscoverOptions = {}): 
   // Static confirmation, preferring cheaper methods and stronger signals.
   const order: DiscoveryMethod[] = ['common_path', 'link_scan', 'sitemap'];
   let best: DiscoveryResult | null = null;
+  const jobSeekerOnly: string[] = [];
   for (const c of candidates) {
     const s = staticFormSignals(c.page.html);
     if (!looksLikeContactForm(s)) continue;
+    const applicantPage = jobSeekerEvidence(c.url, c.page.html);
+    if (applicantPage) {
+      jobSeekerOnly.push(`${c.url} (${applicantPage})`);
+      continue;
+    }
     const conf = scoreForm(c.url, s, c.method);
     if (!best || conf > best.confidence || order.indexOf(c.method) < order.indexOf(best.method)) {
       best = { formUrl: c.url, confidence: conf, method: c.method };
@@ -226,8 +251,10 @@ export async function discoverForm(domain: string, opts: DiscoverOptions = {}): 
 
   // Browser fallback on the most contact-ish candidates (SPA forms live here).
   if (opts.browserFallback !== false) {
-    let targets = candidates.map((c) => c.url).filter((u) => CONTACTISH.test(u));
-    if (targets.length === 0) targets = candidates.map((c) => c.url);
+    const applicantUrls = new Set(jobSeekerOnly.map((x) => x.split(' ')[0]));
+    const usable = candidates.filter((c) => !applicantUrls.has(c.url));
+    let targets = usable.map((c) => c.url).filter((u) => CONTACTISH.test(u));
+    if (targets.length === 0) targets = usable.map((c) => c.url);
     // If static fetch was fully blocked (no candidates at all, e.g. bot-walled
     // sites), still try rendering the common contact paths with a real browser.
     if (targets.length === 0) {
@@ -240,6 +267,10 @@ export async function discoverForm(domain: string, opts: DiscoverOptions = {}): 
     }
   }
 
-  log.info(`${domain} -> FORM_NOT_FOUND`);
+  if (jobSeekerOnly.length > 0) {
+    log.info(`${domain} -> FORM_NOT_FOUND（求職者向けの窓口のみ: ${jobSeekerOnly.join(' / ')}）`);
+  } else {
+    log.info(`${domain} -> FORM_NOT_FOUND`);
+  }
   return { formUrl: null, confidence: 0, method: 'none' };
 }

@@ -73,6 +73,7 @@ const ELIGIBILITY_JA: Record<IneligibleReason, string> = {
   no_sales_policy: '営業お断り',
   off_topic_form: '用途違い（通報・苦情等）',
   consumer_form: '消費者向け/非B2B',
+  job_seeker_form: '求職者向けの応募・選考窓口',
   unfillable_required: '入力できない必須あり',
   message_too_long: '本文が入力上限を超過',
   not_contactable: '本文/会社名の入力先なし',

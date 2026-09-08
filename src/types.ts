@@ -75,6 +75,15 @@ export const SPLIT_TO_BASE: Partial<Record<FieldRole, FieldRole>> = {
 
 export type CaptchaKind = 'none' | 'v2' | 'v3';
 
+/**
+ * 問い合わせ窓口の宛先（判定は crosscutting/formAudience.ts）。
+ * 求職者向けの応募・選考窓口には営業文面を送らない。
+ */
+export type FormAudience =
+  | 'business' // 企業として応対している窓口（送信可）
+  | 'job_seeker' // 求職者向けの応募・選考窓口（送信しない）
+  | 'unknown'; // 材料が足りない（従来どおり送信可）
+
 /** Confidence gate (spec §5). */
 export type Gate = 'high' | 'mid' | 'low' | 'block';
 
@@ -132,6 +141,14 @@ export interface FormSchema {
   hasHoneypot: boolean;
   /** "営業お断り" etc. detected -> compliance suppression (§9). */
   noSalesPolicy: boolean;
+  /**
+   * 窓口の宛先。求職者向けの応募・選考窓口 ('job_seeker') には送らない
+   * （crosscutting/formAudience.ts）。解析時に判定して保存する。古い
+   * field_maps には無いので、その場合は URL と項目から再判定する。
+   */
+  audience?: FormAudience;
+  /** 上の判定根拠（除外理由の表示に使う）。 */
+  audienceEvidence?: string;
   /**
    * True when a required select/radio was auto-filled by an uncertain fallback,
    * or a required radio group could not be confidently chosen (課題C). Caps the

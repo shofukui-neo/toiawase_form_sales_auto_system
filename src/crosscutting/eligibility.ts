@@ -1,6 +1,7 @@
 import type { FormSchema, DetectedField } from '../types.js';
 import type { CoverageResult } from '../layers/coverage.js';
 import { OFF_TOPIC_FIELD_RE } from '../layers/l2_dictionary.js';
+import { classifyFormAudience } from './formAudience.js';
 
 /**
  * Form eligibility gate (承認済みポリシー: 非適格フォームは自動除外).
@@ -11,6 +12,7 @@ import { OFF_TOPIC_FIELD_RE } from '../layers/l2_dictionary.js';
  *   - requires solving a CAPTCHA (can't get past it),
  *   - declares a no-sales policy (§9 compliance),
  *   - is a consumer / non-B2B inquiry form (介護相談・施設見学・来場予約 等),
+ *   - is a 求職者向けの応募・選考窓口 (採用サイトのお問い合わせ・エントリー受付),
  *   - or still has a required field we cannot truthfully fill after mapping.
  *
  * Excluded forms are moved out of the approval queue (see pipeline / sweep), so
@@ -22,6 +24,7 @@ export type IneligibleReason =
   | 'no_sales_policy'
   | 'off_topic_form'
   | 'consumer_form'
+  | 'job_seeker_form'
   | 'unfillable_required'
   | 'message_too_long'
   | 'not_contactable';
@@ -81,6 +84,19 @@ export function classifyEligibility(schema: FormSchema, cov: CoverageResult): El
     .find((h) => OFF_TOPIC_FIELD_RE.test(h));
   if (offTopicHit) {
     return { eligible: false, reason: 'off_topic_form', detail: offTopicHit.replace(/\s+/g, ' ').slice(0, 40) };
+  }
+
+  // 求職者向けの窓口（採用サイトのお問い合わせ・応募受付）には送らない。
+  // 送り先は「企業として応対している窓口」に限る ─ 総合お問い合わせ、法人窓口、
+  // 採用担当へのご提案窓口。応募者を待っている窓口に営業文面が届いても、
+  // 相手の採用業務を妨げるだけで商談にはならない。
+  // 解析時に判定した結果を使い、判定前に保存された古い field_maps は
+  // URL と入力項目から再判定する（ページ本文が無いぶん保守的に効く）。
+  const audience = schema.audience
+    ? { audience: schema.audience, evidence: schema.audienceEvidence ?? '' }
+    : classifyFormAudience({ formUrl: schema.formUrl, fields: schema.fields });
+  if (audience.audience === 'job_seeker') {
+    return { eligible: false, reason: 'job_seeker_form', detail: audience.evidence || undefined };
   }
 
   // Consumer / non-B2B: scan every non-honeypot field's text for care/visit signals.

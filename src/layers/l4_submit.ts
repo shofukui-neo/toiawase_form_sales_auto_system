@@ -7,6 +7,7 @@ import { BrowserSession, withBrowserSlot } from '../browser/browser.js';
 import { extractButtons, type ButtonInfo } from '../browser/extract.js';
 import { judgeResult, type Judgment } from './l5_result.js';
 import { shouldFillField, resolveFieldValue } from './fillPolicy.js';
+import { isApplicantOption } from '../crosscutting/formAudience.js';
 import { logger } from '../utils/logger.js';
 
 const log = logger('L4');
@@ -273,14 +274,21 @@ function senderPrefecture(): string | null {
   return m ? m[1] : null;
 }
 
+/** 企業としての用件を表す選択肢（種別の自動選択で最初に狙う）。 */
+const BUSINESS_OPT_RE = /法人|企業|会社全般|お取引|取引|営業|ご提案|提案|売込|サービス|製品|商品|事業|導入|ご相談/;
+
 /**
  * Choose the best option index for a category/prefecture choice:
  *   1. prefecture list -> match the sender's prefecture
- *   2. a recruitment-related option (最適: 採用/新卒/人事…) — ideal for our pitch
+ *   2. 企業としての用件の選択肢（法人/お取引/サービス/ご相談…）
  *   3. a neutral 「その他」
  *   4. first non-placeholder
+ *
+ * 「新卒採用」「ご応募」「エントリー」など求職者向けの選択肢は決して選ばない。
+ * 以前はここで採用系の選択肢を優先していたが、それは応募者を受ける窓口で、
+ * 選ぶと営業の問い合わせが応募として処理されてしまう（formAudience）。
  */
-function pickChoiceIndex(labels: string[]): number {
+export function pickChoiceIndex(labels: string[]): number {
   if (isPrefectureList(labels)) {
     const pref = senderPrefecture();
     if (pref) {
@@ -288,13 +296,12 @@ function pickChoiceIndex(labels: string[]): number {
       if (i >= 0) return i;
     }
   }
-  const recruit = labels.findIndex(
-    (o) => /採用|新卒|中途|人事|人材|リクルート|エントリー|recruit|hr/i.test(o) && !isPlaceholderOpt(o),
-  );
-  if (recruit >= 0) return recruit;
-  const other = labels.findIndex((o) => /その他|other|下記以外/i.test(o) && !isPlaceholderOpt(o));
+  const usable = (o: string) => !isPlaceholderOpt(o) && !isApplicantOption(o);
+  const business = labels.findIndex((o) => BUSINESS_OPT_RE.test(o) && usable(o));
+  if (business >= 0) return business;
+  const other = labels.findIndex((o) => /その他|other|下記以外/i.test(o) && usable(o));
   if (other >= 0) return other;
-  return labels.findIndex((o) => !isPlaceholderOpt(o));
+  return labels.findIndex(usable);
 }
 
 /**

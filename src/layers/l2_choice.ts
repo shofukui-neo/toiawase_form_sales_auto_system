@@ -1,4 +1,5 @@
 import type { DetectedField, FieldMapping } from '../types.js';
+import { isApplicantOption } from '../crosscutting/formAudience.js';
 
 /**
  * L2 required-choice auto-selection (spec §4-L2 課題C).
@@ -14,6 +15,8 @@ import type { DetectedField, FieldMapping } from '../types.js';
  *   - radio group: ONLY auto-select when a preferred keyword matches. If nothing
  *     matches we do NOT guess a radio (could be 介護状況/性別 on a consumer form);
  *     we flag it ambiguous and leave it for the human.
+ *   - 「新卒採用」「ご応募」など求職者向けの選択肢は、フォールバックでも絶対に
+ *     選ばない。選んだ時点で応募として受け付けられてしまう（formAudience）。
  *   Any ambiguity caps the gate below 'high' (see gate.ts).
  */
 
@@ -49,7 +52,9 @@ function norm(s: string | null | undefined): string {
 
 /** Choose an option from a list of labels. */
 export function pickOption(options: string[]): { value: string; confident: boolean } | null {
-  const real = options.map(norm).filter((o) => o && !PLACEHOLDER.test(o));
+  // 求職者向けの選択肢は候補から外す。全部そうなら選ばない（＝応募受付の窓口で、
+  // eligibility が企業ごと除外する）。
+  const real = options.map(norm).filter((o) => o && !PLACEHOLDER.test(o) && !isApplicantOption(o));
   if (real.length === 0) return null;
   for (const kw of PREFERRED) {
     const hit = real.find((o) => o.includes(kw));
@@ -147,8 +152,9 @@ function groupByName(fields: DetectedField[], type: string): Map<string, Detecte
 
 /** The first member whose label contains a PREFERRED keyword, else null (never guess). */
 function pickByKeyword(members: DetectedField[]): DetectedField | null {
+  const usable = members.filter((m) => !isApplicantOption(norm(m.labelText)));
   for (const kw of PREFERRED) {
-    const hit = members.find((m) => norm(m.labelText).includes(kw));
+    const hit = usable.find((m) => norm(m.labelText).includes(kw));
     if (hit) return hit;
   }
   return null;
