@@ -9,7 +9,9 @@ import { discoverAndParse, buildPlan, runExecute, reparse } from './pipeline/pip
 import { listPending, approve, reject, suppressCompany } from './pipeline/approval.js';
 import { exportReport, exportSuppression } from './layers/l6_record.js';
 import { formatFunnel } from './pipeline/funnel.js';
-import { assignVariant, experimentWarnings, VARIANTS } from './pipeline/experiment.js';
+import { assignVariant, experimentWarnings } from './pipeline/experiment.js';
+import { formatRound, learn, resetLearningCache } from './pipeline/learning.js';
+import { activeVariants, allVariants, setVariantStatus, templateProblems, type VariantStatus } from './pipeline/variants.js';
 import { importReplies } from './pipeline/replyImport.js';
 import { preflight, formatPreflight } from './pipeline/preflight.js';
 import { transition } from './core/stateMachine.js';
@@ -312,6 +314,9 @@ program
     if (o.apply) {
       console.log(`記録した反応      : ${r.recorded}`);
       console.log('`toiawase funnel` で文面パターン別の返信率・アポ率を確認できます。');
+      // 反応が入ったら即座に学習し直す。次に送る企業から新しい配分になる。
+      console.log('');
+      console.log(formatRound(learn({ apply: true })));
     } else {
       console.log('確認のみ（記録していません）。--apply を付けると記録します。');
     }
@@ -319,16 +324,17 @@ program
 
 program
   .command('experiment')
-  .description('文面 A/B の状況 — 腕の定義と、対象企業がどう割り振られるか')
-  .option('--sample <n>', '割り当ての偏りを確認する件数', '2000')
+  .description('文面の割り当て状況 — 配信中の文面と、承認待ちの企業が学習した配分でどう割れるか')
+  .option('--sample <n>', '割り当てを確認する件数', '2000')
   .action((o: { sample: string }) => {
     for (const w of experimentWarnings()) console.log(`⚠ ${w}`);
+    const round = learn({ apply: true });
     console.log('');
-    console.log('=== 文面パターン ===');
-    for (const v of VARIANTS) console.log(`  ${v.name.padEnd(10)} ${v.template.padEnd(18)} ${v.hypothesis}`);
-
-    // まだ送っていない企業が実際どう割り振られるかを見る。設計上は均等だが、
-    // 手元の ID 分布で偏らないことを送る前に確認できるようにしておく。
+    console.log('=== 配信中の文面 ===');
+    for (const v of activeVariants()) {
+      const share = round.weights[v.name];
+      console.log(`  ${v.name.padEnd(14)} ${v.template.padEnd(22)} 配分 ${share ? `${(share * 100).toFixed(1)}%` : '—'}  ${v.hypothesis}`);
+    }
     const pending = companies.byStatus('PENDING_APPROVAL', Number(o.sample));
     const counts = new Map<string, number>();
     for (const c of pending) {
@@ -337,14 +343,94 @@ program
     }
     console.log('');
     console.log(`=== 承認待ち ${pending.length} 社の割り当て ===`);
-    for (const v of VARIANTS) {
+    for (const v of activeVariants()) {
       const n = counts.get(v.name) ?? 0;
       const pct = pending.length ? ((n / pending.length) * 100).toFixed(1) : '0.0';
-      console.log(`  ${v.name.padEnd(10)} ${String(n).padStart(5)} 社  ${pct}%`);
+      console.log(`  ${v.name.padEnd(14)} ${String(n).padStart(5)} 社  ${pct}%`);
     }
     console.log('');
-    console.log('結果は `toiawase funnel` の「文面パターン別」で比較できます。');
-    console.log('返信・アポを `toiawase outcome <企業ID> reply|appointment` で記録しないと差は出ません。');
+    console.log('配分は送信・反応が増えるたびに自動で引き直されます（`toiawase learn` で根拠を表示）。');
+  });
+
+program
+  .command('learn')
+  .description('文面の学習（PDCA）— 結果を集計し、配分を更新し、負けた文面を外す。--generate で次の挑戦者文面を下書き')
+  .option('--dry-run', '集計と判断だけ表示し、状態は変えない', false)
+  .option('--generate', '結果を読んで、変更点を一つにした挑戦者文面を LLM で下書きする（配信は承認後）', false)
+  .option('--parent <name>', '挑戦者の親にする文面（既定: 最良である確率が最も高い文面）')
+  .action(async (o: { dryRun: boolean; generate: boolean; parent?: string }) => {
+    const round = learn({ apply: !o.dryRun });
+    console.log(formatRound(round));
+    if (o.dryRun) console.log('\n（--dry-run: 状態の変更と記録はしていません）');
+    if (!o.generate) return;
+
+    console.log('\n=== 挑戦者文面の生成 ===');
+    const { generateChallenger } = await import('./pipeline/challenger.js');
+    const r = await generateChallenger({ parent: o.parent, dryRun: o.dryRun });
+    if (!r.ok) {
+      console.log('✗ 使える下書きになりませんでした:');
+      for (const p of r.problems) console.log(`  - ${p}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (r.variant) {
+      console.log(`✓ 下書き ${r.variant.name}（親: ${r.variant.parent}）を config/templates/${r.variant.template}.md に保存`);
+      console.log(`  仮説: ${r.variant.hypothesis}`);
+    } else {
+      console.log(`（--dry-run のため保存していません）変更点: ${r.change}`);
+    }
+    console.log('\n--- 本文（サンプル企業で描画） ---');
+    console.log(r.body);
+    if (r.variant) console.log(`\n内容を確認し、問題なければ 'toiawase variant activate ${r.variant.name}' で配信に入ります。`);
+  });
+
+program
+  .command('variant')
+  .description('文面パターンの一覧・状態変更（list | activate | pause | retire <name>）')
+  .argument('<action>', 'list | activate | pause | retire')
+  .argument('[name]', '文面パターン名')
+  .option('--reason <text>', '変更の理由（記録に残る）')
+  .action((action: string, name: string | undefined, o: { reason?: string }) => {
+    if (action === 'list') {
+      for (const v of allVariants()) {
+        console.log(
+          `${v.name.padEnd(16)} ${v.status.padEnd(8)} ${v.template.padEnd(24)} 親=${(v.parent ?? '-').padEnd(10)} ${v.hypothesis}` +
+            (v.statusReason ? `\n${''.padEnd(26)}└ ${v.statusReason}` : ''),
+        );
+      }
+      return;
+    }
+    const map: Record<string, VariantStatus> = { activate: 'active', pause: 'paused', retire: 'retired' };
+    const status = map[action];
+    if (!status || !name) {
+      console.error('使い方: toiawase variant list | activate|pause|retire <name>');
+      process.exitCode = 1;
+      return;
+    }
+    const v = allVariants().find((x) => x.name === name);
+    if (!v) {
+      console.error(`文面パターン ${name} が見つかりません`);
+      process.exitCode = 1;
+      return;
+    }
+    if (status === 'active') {
+      // 人の承認でも、実在の相手に届く条件を満たさない文面は入れない。
+      const { problems } = templateProblems(v.template);
+      if (problems.length) {
+        console.error(`✗ 配信に入れられません: ${problems.join(' / ')}`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (status !== 'active' && v.status === 'active' && activeVariants().length <= 1) {
+      console.error('✗ 配信中の文面が無くなるため止められません。先に別の文面を activate してください。');
+      process.exitCode = 1;
+      return;
+    }
+    setVariantStatus(name, status, o.reason ?? `手動: ${action}`, 'human');
+    resetLearningCache();
+    console.log(`${name}: ${v.status} → ${status}`);
+    console.log(formatRound(learn({ apply: true })));
   });
 
 program
@@ -389,6 +475,14 @@ program
       transition(id, 'REPLIED', { actor: 'human', detail: `outcome:${kind}` });
     }
     console.log(`記録: 企業 ${id} (${company.name}) → ${kind}`);
+    const round = learn({ apply: true });
+    const shares = Object.entries(round.weights)
+      .map(([n, w]) => `${n} ${(w * 100).toFixed(1)}%`)
+      .join(' / ');
+    console.log(`学習を更新: 次の配分 ${shares}`);
+    for (const a of round.actions.filter((x) => x.kind === 'retire' || x.kind === 'pause')) {
+      console.log(`  [${a.kind === 'retire' ? '引退' : '停止'}] ${a.variant}: ${a.reason}`);
+    }
   });
 
 program

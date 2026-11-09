@@ -1,10 +1,10 @@
 import { accessSync, constants, mkdirSync } from 'node:fs';
 import { config } from '../config.js';
 import { db } from '../db/db.js';
-import { renderContent } from '../layers/l3_content.js';
-import { VARIANTS, assignVariant } from './experiment.js';
+import { assignVariant } from './experiment.js';
+import { currentWeights } from './learning.js';
+import { activeVariants, allVariants, templateProblems } from './variants.js';
 import { companies } from '../db/repositories.js';
-import type { CompanyRow, FormSchema } from '../types.js';
 
 /**
  * 送信を始める前の点検。
@@ -25,22 +25,6 @@ export interface Check {
   title: string;
   detail: string;
 }
-
-const SAMPLE = {
-  id: 999999,
-  name: 'サンプル株式会社',
-  domain: 'example.co.jp',
-  status: 'PARSED',
-} as unknown as CompanyRow;
-
-const sampleSchema = {
-  formUrl: 'https://example.co.jp/contact/',
-  fields: [],
-  mappings: [{ role: 'message', selector: '#msg', confidence: 1 }],
-  hasConfirmScreen: false,
-  hasCaptcha: 'none',
-  mappingConfidence: 1,
-} as unknown as FormSchema;
 
 function checkSender(): Check[] {
   const s = config.sender;
@@ -68,28 +52,24 @@ function checkSender(): Check[] {
 
 function checkTemplates(): Check[] {
   const out: Check[] = [];
-  for (const v of VARIANTS) {
-    try {
-      const { body } = renderContent(SAMPLE, sampleSchema, { templateName: v.template });
-      const problems: string[] = [];
-      if (!body.includes(config.sender.company)) problems.push('社名が無い');
-      if (config.sender.email && !body.includes(config.sender.email)) problems.push('返信先が無い');
-      if (!/不要|以後お送りいたしません/.test(body)) problems.push('配信停止の案内が無い');
-      if (!body.includes(SAMPLE.name)) problems.push('宛先企業名が入らない');
-      if (/\{\{|<!--/.test(body)) problems.push('テンプレートの記法が本文に残っている');
-      out.push(
-        problems.length
-          ? { level: 'ng', title: `文面 ${v.name}`, detail: problems.join(' / ') }
-          : { level: 'ok', title: `文面 ${v.name}`, detail: `${body.length}字 — ${v.hypothesis}` },
-      );
-    } catch (e) {
-      out.push({ level: 'ng', title: `文面 ${v.name}`, detail: `読み込めない: ${(e as Error).message}` });
-    }
+  // 配信中に加え、承認待ちの下書きも点検する（activate する前に問題が見えるように）。
+  for (const v of allVariants().filter((x) => x.status === 'active' || x.status === 'draft')) {
+    const { body, problems } = templateProblems(v.template);
+    const title = `文面 ${v.name}${v.status === 'draft' ? '(下書き)' : ''}`;
+    out.push(
+      problems.length
+        ? { level: v.status === 'draft' ? 'warn' : 'ng', title, detail: problems.join(' / ') }
+        : { level: 'ok', title, detail: `${body.length}字 — ${v.hypothesis}` },
+    );
   }
   return out;
 }
 
 function checkExperiment(): Check[] {
+  const active = activeVariants();
+  if (active.length < 2) {
+    return [{ level: 'warn', title: '文面の割り当て', detail: `配信中の文面が ${active.length} 本 — 比較相手が無く学習が進まない` }];
+  }
   const pending = companies.byStatus('PENDING_APPROVAL', 2000);
   if (pending.length === 0) {
     return [{ level: 'warn', title: '文面の割り当て', detail: '承認待ちの企業が無いので偏りを確認できない' }];
@@ -99,12 +79,24 @@ function checkExperiment(): Check[] {
     const n = assignVariant(c.id).name;
     counts.set(n, (counts.get(n) ?? 0) + 1);
   }
-  const shares = VARIANTS.map((v) => (counts.get(v.name) ?? 0) / pending.length);
-  const skewed = shares.some((s) => s < 0.35 || s > 0.65);
-  const detail = VARIANTS.map((v) => `${v.name} ${(((counts.get(v.name) ?? 0) / pending.length) * 100).toFixed(1)}%`).join(' / ');
+  // 配分は学習で意図的に偏る。見るのは「学習した配分どおりに割れているか」。
+  const weights = currentWeights();
+  const sumW = active.reduce((s, v) => s + (weights[v.name] ?? 1 / active.length), 0);
+  const drift = active.some((v) => {
+    const want = (weights[v.name] ?? 1 / active.length) / sumW;
+    const got = (counts.get(v.name) ?? 0) / pending.length;
+    return pending.length >= 200 && Math.abs(want - got) > 0.1;
+  });
+  const detail = active
+    .map((v) => {
+      const want = ((weights[v.name] ?? 1 / active.length) / sumW) * 100;
+      const got = ((counts.get(v.name) ?? 0) / pending.length) * 100;
+      return `${v.name} ${got.toFixed(1)}%（配分 ${want.toFixed(1)}%）`;
+    })
+    .join(' / ');
   return [
-    skewed
-      ? { level: 'warn', title: '文面の割り当て', detail: `偏っている: ${detail}` }
+    drift
+      ? { level: 'warn', title: '文面の割り当て', detail: `配分からずれている: ${detail}` }
       : { level: 'ok', title: '文面の割り当て', detail: `${pending.length} 社: ${detail}` },
   ];
 }

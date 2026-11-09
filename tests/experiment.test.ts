@@ -1,8 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assignVariant, variantByName, VARIANTS } from '../src/pipeline/experiment.js';
-import { renderContent } from '../src/layers/l3_content.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { config } from '../src/config.js';
 import type { CompanyRow, FormSchema } from '../src/types.js';
+
+// 割り当ては学習済みの配分（DB）を読むので、実 DB に触らないよう先に差し替える。
+config.dbPath = join(mkdtempSync(join(tmpdir(), 'experiment-')), 'test.db');
+const { assignVariant, variantByName } = await import('../src/pipeline/experiment.js');
+const { activeVariants } = await import('../src/pipeline/variants.js');
+const { renderContent } = await import('../src/layers/l3_content.js');
+const VARIANTS = activeVariants();
 
 /**
  * 文面 A/B の割り当て。
@@ -57,6 +66,11 @@ test('連番の企業が同じ腕に固まらない（ID をそのまま剰余�
 
 test('記録された名前から文面パターンを復元できる', () => {
   for (const v of VARIANTS) assert.equal(variantByName(v.name).template, v.template);
+});
+
+test('手動指定のテンプレートは送信時もそのテンプレートで再現する', () => {
+  // 以前は manual:<template> が既定テンプレートに倒れ、承認画面と送信内容が食い違っていた。
+  assert.equal(variantByName('manual:mochica_short').template, 'mochica_short');
 });
 
 test('未知の名前・未記録は対照群に倒す（過去の送信を壊さない）', () => {

@@ -90,11 +90,14 @@ export function funnel(sinceDays?: number): {
       .prepare(
         `SELECT COALESCE(s.variant, '(未設定)') variant,
                 SUM(CASE WHEN s.status = 'submitted_success' THEN 1 ELSE 0 END) delivered,
-                COUNT(DISTINCT CASE WHEN o.kind = 'reply' THEN o.company_id END) replies,
-                COUNT(DISTINCT CASE WHEN o.kind = 'appointment' THEN o.company_id END) appointments
+                -- outcomes を JOIN すると 1 社に反応が複数あるだけで「到達」が
+                -- 重複して数えられるので、存在確認だけにする。
+                COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM outcomes o
+                  WHERE o.company_id = s.company_id AND o.kind = 'reply') THEN s.company_id END) replies,
+                COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM outcomes o
+                  WHERE o.company_id = s.company_id AND o.kind = 'appointment') THEN s.company_id END) appointments
            FROM submissions s
-           LEFT JOIN outcomes o ON o.company_id = s.company_id
-          WHERE s.submitted_at IS NOT NULL ${where}
+          WHERE s.submitted_at IS NOT NULL ${where.replace(/submitted_at/g, 's.submitted_at')}
           GROUP BY variant
           ORDER BY delivered DESC`,
       )
@@ -156,5 +159,6 @@ export function formatFunnel(sinceDays?: number): string {
         `  アポ ${String(v.appointments).padStart(4)} (${v.apptRate})`,
     );
   }
+  out.push('', '配分の根拠（最良である確率・返信待ちの割引）は `toiawase learn` で確認できます。');
   return out.join('\n');
 }

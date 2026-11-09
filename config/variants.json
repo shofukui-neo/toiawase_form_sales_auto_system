@@ -1,0 +1,21 @@
+{
+  "$comment": "フォーム営業文面の台帳。status: draft(生成直後・人の承認待ち) / active(配信中) / paused(一時停止) / retired(引退)。実際の状態は学習の結果で DB 側が上書きする（toiawase variant list で確認）。",
+  "variants": [
+    {
+      "name": "default",
+      "template": "mochica_default",
+      "status": "active",
+      "control": true,
+      "hypothesis": "対照群。約1,050字・依頼3つ（返信/資料送付/日程調整）。",
+      "createdAt": "2026-10-01"
+    },
+    {
+      "name": "short",
+      "template": "mochica_short",
+      "status": "active",
+      "hypothesis": "約半分の長さ・依頼は日程調整リンクの一つだけ。",
+      "parent": "default",
+      "createdAt": "2026-10-01"
+    }
+  ]
+}

@@ -254,3 +254,26 @@ CREATE TABLE IF NOT EXISTS outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_company ON outcomes(company_id);
 CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, occurred_at);
+
+-- 文面パターンの状態（config/variants.json の status を上書きする）。
+-- 学習ループが自動で引退・停止させたとき、その理由ごと残す。定義（テンプレート
+-- や仮説）はファイル側、状態は DB 側に置くのは、自動で書き換わる値を
+-- バージョン管理下のファイルに書き戻さないため。
+CREATE TABLE IF NOT EXISTS variant_state (
+  name       TEXT PRIMARY KEY,
+  status     TEXT NOT NULL,          -- draft / active / paused / retired
+  reason     TEXT,
+  actor      TEXT NOT NULL DEFAULT 'learning',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 学習の各回（PDCA の Check→Act）。配分比率と、その根拠になった集計を
+-- 丸ごと残す。どの時点の配分で送ったのかを後から再現できるようにするため。
+CREATE TABLE IF NOT EXISTS learning_rounds (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  fingerprint  TEXT NOT NULL,
+  weights_json TEXT NOT NULL,        -- { <variant>: share }
+  arms_json    TEXT NOT NULL,        -- ArmResult[]
+  actions_json TEXT NOT NULL,        -- 自動で行った状態変更と提案
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);

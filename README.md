@@ -351,6 +351,38 @@ Sheetsレポート層を実体化）。`.env` に `SHEETS_SPREADSHEET_ID` とサ
 （`GOOGLE_SERVICE_ACCOUNT_KEY`）を設定し、対象スプレッドシートをそのサービスアカウントのメールに
 Editor共有すれば有効化。未設定なら警告してスキップ（CSVのみ）。実装: [src/layers/l6_sheets.ts](src/layers/l6_sheets.ts)。
 
+### D — 文面の自己学習（PDCA）
+
+送るたびに結果を読み直し、文面の配分を自動で最適化する。人がやるのは「反応を記録する」と
+「LLM が作った次の文面を読んで承認する」の二つだけ。
+
+| 段階 | 何が起きるか | どこで |
+|---|---|---|
+| Plan | 勝っている文面を親に、変更点を **一つだけ** にした挑戦者文面を LLM が下書き（status=draft） | `learn --generate` |
+| Do | プラン時に、学習した配分で企業ごとに文面を決定（企業IDから決定的。承認画面＝送信内容） | 自動（`plan` / 一斉送信） |
+| Check | 文面ごとのアポ・前向き返信・お断り・配信停止を集計。返信待ち期間中の未反応は割り引く | 自動（送信・反応が増えるたび） |
+| Act | Thompson sampling で「最良である確率」を出し配分を更新。明確な負けは引退、お断り・配信停止が突出した文面は停止 | 自動 |
+
+```bash
+npm run cli -- import-replies ./inbox --apply   # 反応を取り込む → その場で学習し直す
+npm run cli -- outcome 123 appointment          # 手入力でも同じ
+npm run cli -- learn                            # 集計・最良である確率・次の配分・自動判断を表示
+npm run cli -- learn --generate                 # 次の挑戦者文面を下書き（ANTHROPIC_API_KEY が必要）
+npm run cli -- variant list                     # 文面の一覧と状態（引退・停止の理由つき）
+npm run cli -- variant activate gen20261109     # 下書きを読んで問題なければ配信に入れる
+npm run cli -- variant pause short --reason "..."   # 手動で止める
+```
+
+- 成果 = アポ 1 + アポに至らない前向きな返信 0.3。お断り・配信停止は成果 0 で、別途ガードレールに使う。
+- 自動で行うのは **止める方向（引退・停止）だけ**。新しい文面を配信に入れるのは必ず人の承認（`variant activate`）。
+  生成文面は、親に無い数字（導入社数・改善率など根拠の無い実績）、配信停止の案内・宛名・日程調整ブロックの欠落、
+  未知の変数があると保存せずに破棄する。
+- 配信中の文面が 1 本しか無くならないよう、最後の 1 本は自動でも手動でも止めない。
+- 文面の定義は [config/variants.json](config/variants.json)、自動で変わる状態は DB（`variant_state`）、各回の配分と根拠は `learning_rounds` に残る。
+- 主な設定: `LEARNING_RESPONSE_WINDOW_DAYS`（返信待ち日数, 14）/ `LEARNING_MIN_SHARE`（最低配分, 0.1）/
+  `LEARNING_DECISION_MIN`（引退判断に必要な送信数, 200）/ `LEARNING_ENABLED=false`（均等配分に戻す）/ `COPY_LLM_MODEL`。
+- 実装: [src/pipeline/learning.ts](src/pipeline/learning.ts) / [src/pipeline/challenger.ts](src/pipeline/challenger.ts) / [src/pipeline/variants.ts](src/pipeline/variants.ts)
+
 ## 検証（P0 E2E）
 
 外部ネットワーク不要。ローカルのテストフォーム（確認画面あり2段 / 1段 / ハニーポット付き）で
